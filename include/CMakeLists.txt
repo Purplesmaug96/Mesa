@@ -1,0 +1,33 @@
+# Mesa3D - include/ (mirror of include/meson.build)
+# SPDX-License-Identifier: MIT
+# inc_include / inc_winddk are defined in the top-level CMakeLists.txt
+# (CMake variables do not flow between sibling subdirectories).
+
+# header install rules mirroring meson install_headers
+if(NOT with_glvnd AND NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+  if(with_gles1 OR with_gles2 OR with_opengl OR with_egl STREQUAL "ON")
+    install(FILES KHR/khrplatform.h DESTINATION include/KHR)
+  endif()
+  if(with_gles1)
+    install(FILES GLES/egl.h GLES/gl.h GLES/glext.h GLES/glplatform.h DESTINATION include/GLES)
+  endif()
+  if(with_gles2)
+    install(FILES GLES2/gl2.h GLES2/gl2ext.h GLES2/gl2platform.h DESTINATION include/GLES2)
+    install(FILES GLES3/gl3.h GLES3/gl31.h GLES3/gl32.h GLES3/gl3ext.h GLES3/gl3platform.h DESTINATION include/GLES3)
+  endif()
+  if(with_opengl)
+    install(FILES GL/gl.h GL/glcorearb.h GL/glext.h DESTINATION include/GL)
+  endif()
+  if(NOT with_glx STREQUAL "disabled")
+    install(FILES GL/glx.h GL/glxext.h DESTINATION include/GL)
+  endif()
+  if(with_egl STREQUAL "ON")
+    install(FILES EGL/egl.h EGL/eglext.h EGL/eglplatform.h DESTINATION include/EGL)
+  endif()
+endif()
+if(with_egl STREQUAL "ON")
+  install(FILES EGL/eglext_angle.h EGL/eglmesaext.h DESTINATION include/EGL)
+endif()
+if(with_dri)
+  install(FILES GL/internal/dri_interface.h DESTINATION include/GL/internal)
+endif()
