@@ -7,6 +7,8 @@ set(dir_compiler_nir "${CMAKE_SOURCE_DIR}/src/compiler/nir/")
 # include dirs used across the tree (meson inc_* variables)
 set(inc_mesa "${CMAKE_CURRENT_SOURCE_DIR}/mesa")
 set(inc_src "${CMAKE_CURRENT_SOURCE_DIR}")
+set(inc_util "${CMAKE_CURRENT_SOURCE_DIR}/util")
+set(inc_loader "${CMAKE_CURRENT_SOURCE_DIR}/loader")
 set(inc_gallium "${CMAKE_CURRENT_SOURCE_DIR}/gallium/include")
 set(inc_gallium_aux "${CMAKE_CURRENT_SOURCE_DIR}/gallium/auxiliary")
 set(inc_amd_common "${CMAKE_CURRENT_SOURCE_DIR}/amd/common;${CMAKE_CURRENT_SOURCE_DIR}/amd/common/nir")
@@ -45,6 +47,10 @@ add_subdirectory(util)
 # helper scripts shared across the src/ tree (meson: files() entries from src/meson.build)
 set(files_xxd "${CMAKE_CURRENT_SOURCE_DIR}/util/xxd.py")
 set(glsl2spirv "${CMAKE_CURRENT_SOURCE_DIR}/util/glsl2spirv.py")
+set(u_trace_py "${CMAKE_CURRENT_SOURCE_DIR}/util/perf/u_trace.py")
+set(nir_algebraic_depends
+  "${CMAKE_CURRENT_SOURCE_DIR}/compiler/nir/nir_opcodes.py"
+  "${CMAKE_CURRENT_SOURCE_DIR}/compiler/nir/nir_algebraic.py")
 
 # loader is needed by gallium/lvp, gbm, wayland, x11
 set(with_loader OFF)

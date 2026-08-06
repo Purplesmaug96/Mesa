@@ -106,11 +106,16 @@ if(MESA_OP_LIBUNWIND STREQUAL "enabled" OR MESA_OP_LIBUNWIND STREQUAL "auto")
 endif()
 
 # --- valgrind ---
+# headers-only: the valgrind pkg-config on some systems exports non-PIC
+# static libs (-lcoregrind/-lvex) which cannot be linked into a shared lib;
+# mesa only uses valgrind.h macros, never links against valgrind.
 set(dep_valgrind "")
 if(MESA_OP_VALGRIND STREQUAL "enabled" OR MESA_OP_VALGRIND STREQUAL "auto")
-  pkg_check_modules(PC_VALGRIND IMPORTED_TARGET valgrind)
+  pkg_check_modules(PC_VALGRIND valgrind)
   if(PC_VALGRIND_FOUND)
-    set(dep_valgrind PkgConfig::PC_VALGRIND)
+    add_library(dep_valgrind INTERFACE)
+    target_include_directories(dep_valgrind INTERFACE ${PC_VALGRIND_INCLUDE_DIRS})
+    set(dep_valgrind dep_valgrind)
     add_compile_definitions(-DHAVE_VALGRIND)
   endif()
 endif()
@@ -134,6 +139,7 @@ if(PC_LIBUDEV_FOUND)
 endif()
 
 # --- glvnd ---
+set(dep_ws2_32 "")
 set(dep_glvnd "")
 pkg_check_modules(PC_GLVND IMPORTED_TARGET libglvnd)
 if(PC_GLVND_FOUND AND NOT with_platform_windows AND NOT with_glx STREQUAL "xlib")
@@ -142,9 +148,7 @@ if(PC_GLVND_FOUND AND NOT with_platform_windows AND NOT with_glx STREQUAL "xlib"
 else()
   set(with_glvnd OFF)
 endif()
-if(with_glvnd)
-  add_compile_definitions(-DUSE_LIBGLVND=1)
-endif()
+# -DUSE_LIBGLVND is handled in the top-level CMakeLists.txt (0/1)
 
 # --- LLVM ---
 # Mesa uses llvm-config (config-tool method) on non-Windows; find_package(LLVM)
@@ -182,6 +186,7 @@ if(LLVM_FOUND)
     OUTPUT_VARIABLE LLVM_SYSTEM_LIBS OUTPUT_STRIP_TRAILING_WHITESPACE)
   set(LLVM_LIBS "${LLVM_LIBS} ${LLVM_SYSTEM_LIBS}")
   separate_arguments(LLVM_LIBS_LIST UNIX_COMMAND "${LLVM_LIBS}")
+  set(dep_llvm ${LLVM_LIBS_LIST})
   # add definitions
   execute_process(COMMAND ${LLVM_CONFIG_EXE} --cppflags OUTPUT_VARIABLE LLVM_CPPFLAGS OUTPUT_STRIP_TRAILING_WHITESPACE)
   separate_arguments(LLVM_CPPFLAGS_LIST UNIX_COMMAND "${LLVM_CPPFLAGS}")
@@ -204,6 +209,7 @@ else()
   set(with_llvm OFF)
   set(draw_with_llvm OFF)
   set(amd_with_llvm OFF)
+  add_compile_definitions(-DGALLIVM_USE_ORCJIT=0)
 endif()
 set(amd_with_llvm OFF)  # AMD LLVM path not enabled in this port
 

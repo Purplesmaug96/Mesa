@@ -59,7 +59,8 @@ foreach(_a IN ITEMS const flatten malloc packed pure returns_nonnull format unus
   elseif(_a STREQUAL "warn_unused_result")
     set(_code "int f(void) __attribute__((warn_unused_result));")
   endif()
-  check_c_source_compiles("${_code}" __mesa_attr_${_a})
+  check_c_source_compiles("${_code}
+int main(void){return 0;}" __mesa_attr_${_a})
   if(__mesa_attr_${_a})
     add_compile_definitions(-DHAVE_FUNC_ATTRIBUTE_${_au})
   endif()
@@ -254,6 +255,8 @@ if(HAVE_GC_SECTIONS)
   add_compile_definitions(-DHAVE_GC_SECTIONS)  # placeholder, not used
 endif()
 set(with_ld_version_script ON)
+set(with_ld_dynamic_list ON)
+set(ld_args_build_id -Wl,--build-id=sha1)
 
 # bool meson compile flags: no_override_init
 set(CMAKE_REQUIRED_FLAGS "-Wno-override-init")
