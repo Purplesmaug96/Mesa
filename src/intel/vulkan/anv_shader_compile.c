@@ -11,6 +11,7 @@
 
 #include "nir/nir_builtin_builder.h"
 
+#include "common/intel_common.h"
 #include "common/intel_compute_slm.h"
 #include "common/intel_l3_config.h"
 
@@ -1901,9 +1902,9 @@ anv_bsr(const struct intel_device_info *devinfo,
     * these bits if VRT is disabled.
     */
    uint64_t registers_per_thread =
-      devinfo->ver >= 30 ? ((uint64_t)brw_register_blocks(devinfo,
-                                                          grf_used) << 60) :
-                                                          0;
+      devinfo->ver >= 30 ? ((uint64_t)intel_register_blocks(devinfo,
+                                                            grf_used) << 60) :
+                           0;
    return registers_per_thread |
           offset |
           SET_BITS(bindless_shader_dispatch_mode, 4, 4) |
@@ -2212,6 +2213,10 @@ anv_shader_compile(struct vk_device *vk_device,
       case MESA_SHADER_COMPUTE:
          populate_cs_prog_key(&shader_data->key.cs, vk_device->physical,
                               info->robustness);
+         shader_data->prog_data.cs.force_simd32 =
+            device->info->ver >= 20 &&
+            shader_data->workaround != NULL &&
+            shader_data->workaround->force_xe2_simd32_cs;
          break;
       case MESA_SHADER_RAYGEN:
       case MESA_SHADER_ANY_HIT:

@@ -197,6 +197,7 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
       VkPhysicalDeviceRobustness2FeaturesKHR robustness_2;
       VkPhysicalDeviceShaderBfloat16FeaturesKHR shader_bfloat16;
       VkPhysicalDeviceShaderClockFeaturesKHR shader_clock;
+      VkPhysicalDeviceShaderConstantDataFeaturesKHR shader_constant_data;
       VkPhysicalDeviceShaderFmaFeaturesKHR shader_fma;
       VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR
          shader_maximal_reconvergence;
@@ -206,6 +207,7 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
       VkPhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR
          shader_subgroup_uniform_control_flow;
       VkPhysicalDeviceShaderUntypedPointersFeaturesKHR shader_untyped_pointers;
+      VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR unified_image_layouts;
       VkPhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR
          workgroup_memory_explicit_layout;
 
@@ -249,6 +251,7 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
       VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT non_seamless_cube_map;
       VkPhysicalDevicePipelineLibraryGroupHandlesFeaturesEXT
          pipeline_library_group_handles;
+      VkPhysicalDevicePrimitiveRestartIndexFeaturesEXT primitive_restart_index;
       VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT
          primitive_topology_list_restart;
       VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT
@@ -256,6 +259,7 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
       VkPhysicalDeviceProvokingVertexFeaturesEXT provoking_vertex;
       VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT
          rasterization_order_attachment_access;
+      VkPhysicalDeviceRGBA10X6FormatsFeaturesEXT rgba10x6_formats;
       VkPhysicalDeviceShaderAtomicFloatFeaturesEXT shader_atomic_float;
       VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT shader_atomic_float_2;
       VkPhysicalDeviceShaderFloat8FeaturesEXT shader_float8;
@@ -263,12 +267,18 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
          shader_image_atomic_int64;
       VkPhysicalDeviceShaderReplicatedCompositesFeaturesEXT
          shader_replicated_composites;
+      VkPhysicalDeviceShaderSplitBarrierFeaturesEXT shader_split_barrier;
+      VkPhysicalDeviceShaderTileImageFeaturesEXT shader_tile_image;
       VkPhysicalDeviceShaderUniformBufferUnsizedArrayFeaturesEXT
          shader_uniform_buffer_unsized_array;
       VkPhysicalDeviceTransformFeedbackFeaturesEXT transform_feedback;
+      VkPhysicalDeviceVertexAttributeRobustnessFeaturesEXT
+         vertex_attribute_robustness;
       VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT
          vertex_input_dynamic_state;
       VkPhysicalDeviceYcbcrImageArraysFeaturesEXT ycbcr_image_arrays;
+      VkPhysicalDeviceZeroInitializeDeviceMemoryFeaturesEXT
+         zero_initialize_device_memory;
    } local_feats;
 
    /* Clear the struct so that all unqueried features will be VK_FALSE. */
@@ -374,12 +384,14 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
    VN_ADD_PNEXT_EXT(feats2, ROBUSTNESS_2_FEATURES_KHR, local_feats.robustness_2, exts->KHR_robustness2 || exts->EXT_robustness2);
    VN_ADD_PNEXT_EXT(feats2, SHADER_BFLOAT16_FEATURES_KHR, local_feats.shader_bfloat16, exts->KHR_shader_bfloat16);
    VN_ADD_PNEXT_EXT(feats2, SHADER_CLOCK_FEATURES_KHR, local_feats.shader_clock, exts->KHR_shader_clock);
+   VN_ADD_PNEXT_EXT(feats2, SHADER_CONSTANT_DATA_FEATURES_KHR, local_feats.shader_constant_data, exts->KHR_shader_constant_data);
    VN_ADD_PNEXT_EXT(feats2, SHADER_FMA_FEATURES_KHR, local_feats.shader_fma, exts->KHR_shader_fma);
    VN_ADD_PNEXT_EXT(feats2, SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR, local_feats.shader_maximal_reconvergence, exts->KHR_shader_maximal_reconvergence);
    VN_ADD_PNEXT_EXT(feats2, SHADER_RELAXED_EXTENDED_INSTRUCTION_FEATURES_KHR, local_feats.shader_relaxed_extended_instruction, exts->KHR_shader_relaxed_extended_instruction);
    VN_ADD_PNEXT_EXT(feats2, SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_FEATURES_KHR, local_feats.shader_subgroup_uniform_control_flow, exts->KHR_shader_subgroup_uniform_control_flow);
    VN_ADD_PNEXT_EXT(feats2, SHADER_QUAD_CONTROL_FEATURES_KHR, local_feats.shader_quad_control, exts->KHR_shader_quad_control);
    VN_ADD_PNEXT_EXT(feats2, SHADER_UNTYPED_POINTERS_FEATURES_KHR, local_feats.shader_untyped_pointers, exts->KHR_shader_untyped_pointers);
+   VN_ADD_PNEXT_EXT(feats2, UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR, local_feats.unified_image_layouts, exts->KHR_unified_image_layouts);
    VN_ADD_PNEXT_EXT(feats2, WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR, local_feats.workgroup_memory_explicit_layout, exts->KHR_workgroup_memory_explicit_layout);
 
    /* EXT */
@@ -412,19 +424,25 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
    VN_ADD_PNEXT_EXT(feats2, NESTED_COMMAND_BUFFER_FEATURES_EXT, local_feats.nested_command_buffer, exts->EXT_nested_command_buffer);
    VN_ADD_PNEXT_EXT(feats2, NON_SEAMLESS_CUBE_MAP_FEATURES_EXT, local_feats.non_seamless_cube_map, exts->EXT_non_seamless_cube_map);
    VN_ADD_PNEXT_EXT(feats2, PIPELINE_LIBRARY_GROUP_HANDLES_FEATURES_EXT, local_feats.pipeline_library_group_handles, exts->EXT_pipeline_library_group_handles);
+   VN_ADD_PNEXT_EXT(feats2, PRIMITIVE_RESTART_INDEX_FEATURES_EXT, local_feats.primitive_restart_index, exts->EXT_primitive_restart_index);
    VN_ADD_PNEXT_EXT(feats2, PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT, local_feats.primitive_topology_list_restart, exts->EXT_primitive_topology_list_restart);
    VN_ADD_PNEXT_EXT(feats2, PRIMITIVES_GENERATED_QUERY_FEATURES_EXT, local_feats.primitives_generated_query, exts->EXT_primitives_generated_query);
    VN_ADD_PNEXT_EXT(feats2, PROVOKING_VERTEX_FEATURES_EXT, local_feats.provoking_vertex, exts->EXT_provoking_vertex);
    VN_ADD_PNEXT_EXT(feats2, RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT, local_feats.rasterization_order_attachment_access, exts->EXT_rasterization_order_attachment_access || exts->ARM_rasterization_order_attachment_access);
+   VN_ADD_PNEXT_EXT(feats2, RGBA10X6_FORMATS_FEATURES_EXT, local_feats.rgba10x6_formats, exts->EXT_rgba10x6_formats);
    VN_ADD_PNEXT_EXT(feats2, SHADER_ATOMIC_FLOAT_FEATURES_EXT, local_feats.shader_atomic_float, exts->EXT_shader_atomic_float);
    VN_ADD_PNEXT_EXT(feats2, SHADER_ATOMIC_FLOAT_2_FEATURES_EXT, local_feats.shader_atomic_float_2, exts->EXT_shader_atomic_float2);
    VN_ADD_PNEXT_EXT(feats2, SHADER_FLOAT8_FEATURES_EXT, local_feats.shader_float8, exts->EXT_shader_float8);
    VN_ADD_PNEXT_EXT(feats2, SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT, local_feats.shader_image_atomic_int64, exts->EXT_shader_image_atomic_int64);
    VN_ADD_PNEXT_EXT(feats2, SHADER_REPLICATED_COMPOSITES_FEATURES_EXT, local_feats.shader_replicated_composites, exts->EXT_shader_replicated_composites);
+   VN_ADD_PNEXT_EXT(feats2, SHADER_SPLIT_BARRIER_FEATURES_EXT, local_feats.shader_split_barrier, exts->EXT_shader_split_barrier);
+   VN_ADD_PNEXT_EXT(feats2, SHADER_TILE_IMAGE_FEATURES_EXT, local_feats.shader_tile_image, exts->EXT_shader_tile_image);
    VN_ADD_PNEXT_EXT(feats2, SHADER_UNIFORM_BUFFER_UNSIZED_ARRAY_FEATURES_EXT, local_feats.shader_uniform_buffer_unsized_array, exts->EXT_shader_uniform_buffer_unsized_array);
    VN_ADD_PNEXT_EXT(feats2, TRANSFORM_FEEDBACK_FEATURES_EXT, local_feats.transform_feedback, exts->EXT_transform_feedback);
+   VN_ADD_PNEXT_EXT(feats2, VERTEX_ATTRIBUTE_ROBUSTNESS_FEATURES_EXT, local_feats.vertex_attribute_robustness, exts->EXT_vertex_attribute_robustness);
    VN_ADD_PNEXT_EXT(feats2, VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT, local_feats.vertex_input_dynamic_state, exts->EXT_vertex_input_dynamic_state);
    VN_ADD_PNEXT_EXT(feats2, YCBCR_IMAGE_ARRAYS_FEATURES_EXT, local_feats.ycbcr_image_arrays, exts->EXT_ycbcr_image_arrays);
+   VN_ADD_PNEXT_EXT(feats2, ZERO_INITIALIZE_DEVICE_MEMORY_FEATURES_EXT, local_feats.zero_initialize_device_memory, exts->EXT_zero_initialize_device_memory);
 
    /* clang-format on */
 
@@ -672,6 +690,8 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
       VkPhysicalDevicePCIBusInfoPropertiesEXT pci_bus_info;
       VkPhysicalDeviceProvokingVertexPropertiesEXT provoking_vertex;
       VkPhysicalDeviceSampleLocationsPropertiesEXT sample_locations;
+      VkPhysicalDeviceShaderSplitBarrierPropertiesEXT shader_split_barrier;
+      VkPhysicalDeviceShaderTileImagePropertiesEXT shader_tile_image;
       VkPhysicalDeviceTransformFeedbackPropertiesEXT transform_feedback;
       VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT
          vertex_attribute_divisor_ext;
@@ -766,6 +786,8 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
    VN_ADD_PNEXT_EXT(props2, PCI_BUS_INFO_PROPERTIES_EXT, local_props.pci_bus_info, exts->EXT_pci_bus_info);
    VN_ADD_PNEXT_EXT(props2, PROVOKING_VERTEX_PROPERTIES_EXT, local_props.provoking_vertex, exts->EXT_provoking_vertex);
    VN_ADD_PNEXT_EXT(props2, SAMPLE_LOCATIONS_PROPERTIES_EXT, local_props.sample_locations, exts->EXT_sample_locations);
+   VN_ADD_PNEXT_EXT(props2, SHADER_SPLIT_BARRIER_PROPERTIES_EXT, local_props.shader_split_barrier, exts->EXT_shader_split_barrier);
+   VN_ADD_PNEXT_EXT(props2, SHADER_TILE_IMAGE_PROPERTIES_EXT, local_props.shader_tile_image, exts->EXT_shader_tile_image);
    VN_ADD_PNEXT_EXT(props2, TRANSFORM_FEEDBACK_PROPERTIES_EXT, local_props.transform_feedback, exts->EXT_transform_feedback);
    VN_ADD_PNEXT_EXT(props2, VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT, local_props.vertex_attribute_divisor_ext, !exts->KHR_vertex_attribute_divisor && exts->EXT_vertex_attribute_divisor);
 
@@ -852,6 +874,8 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
    VN_SET_VK_PROPS_EXT(props, &local_props.pci_bus_info, exts->EXT_pci_bus_info);
    VN_SET_VK_PROPS_EXT(props, &local_props.provoking_vertex, exts->EXT_provoking_vertex);
    VN_SET_VK_PROPS_EXT(props, &local_props.sample_locations, exts->EXT_sample_locations);
+   VN_SET_VK_PROPS_EXT(props, &local_props.shader_split_barrier, exts->EXT_shader_split_barrier);
+   VN_SET_VK_PROPS_EXT(props, &local_props.shader_tile_image, exts->EXT_shader_tile_image);
    VN_SET_VK_PROPS_EXT(props, &local_props.transform_feedback, exts->EXT_transform_feedback);
    VN_SET_VK_PROPS_EXT(props, &local_props.vertex_attribute_divisor_ext, !exts->KHR_vertex_attribute_divisor && exts->EXT_vertex_attribute_divisor);
 
@@ -1333,12 +1357,14 @@ vn_physical_device_get_passthrough_extensions(
       .KHR_robustness2 = true,
       .KHR_shader_bfloat16 = true,
       .KHR_shader_clock = true,
+      .KHR_shader_constant_data = true,
       .KHR_shader_fma = true,
       .KHR_shader_maximal_reconvergence = true,
       .KHR_shader_quad_control = true,
       .KHR_shader_relaxed_extended_instruction = true,
       .KHR_shader_subgroup_uniform_control_flow = true,
       .KHR_shader_untyped_pointers = true,
+      .KHR_unified_image_layouts = true,
       .KHR_workgroup_memory_explicit_layout = true,
 
       /* EXT */
@@ -1388,11 +1414,13 @@ vn_physical_device_get_passthrough_extensions(
       .EXT_non_seamless_cube_map = true,
       .EXT_pipeline_library_group_handles = physical_dev->ray_tracing,
       .EXT_post_depth_coverage = true,
+      .EXT_primitive_restart_index = true,
       .EXT_primitive_topology_list_restart = true,
       .EXT_primitives_generated_query = true,
       .EXT_provoking_vertex = true,
       .EXT_queue_family_foreign = true,
       .EXT_rasterization_order_attachment_access = true,
+      .EXT_rgba10x6_formats = true,
       .EXT_robustness2 = true,
       .EXT_sample_locations = true,
       .EXT_shader_atomic_float = true,
@@ -1400,13 +1428,18 @@ vn_physical_device_get_passthrough_extensions(
       .EXT_shader_float8 = true,
       .EXT_shader_image_atomic_int64 = true,
       .EXT_shader_replicated_composites = true,
+      .EXT_shader_split_barrier = true,
       .EXT_shader_stencil_export = true,
       .EXT_shader_subgroup_ballot = true,
       .EXT_shader_subgroup_vote = true,
+      .EXT_shader_tile_image = true,
       .EXT_shader_uniform_buffer_unsized_array = true,
       .EXT_transform_feedback = true,
       .EXT_vertex_attribute_divisor = true,
+      .EXT_vertex_attribute_robustness = true,
       .EXT_vertex_input_dynamic_state = true,
+      .EXT_ycbcr_image_arrays = true,
+      .EXT_zero_initialize_device_memory = true,
 
       /* vendor */
       .ARM_rasterization_order_attachment_access = true,
@@ -2181,12 +2214,10 @@ vn_sanitize_format_properties(VkFormat format,
       VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT |
       VK_FORMAT_FEATURE_DISJOINT_BIT;
 
-   /* TODO drop rgba10x6 after supporting VK_EXT_rgba10x6_formats */
    switch (format) {
    case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
    case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
    case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16:
-   case VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16:
       props->linearTilingFeatures &= allowed_ycbcr_feats;
       props->optimalTilingFeatures &= allowed_ycbcr_feats;
       if (props3) {
@@ -2638,11 +2669,6 @@ vn_sanitize_image_format_properties(
       physical_dev->external_memory.renderer_handle_type;
    const VkExternalMemoryHandleTypeFlags supported_handle_types =
       physical_dev->external_memory.supported_handle_types;
-
-   /* TODO drop this after supporting VK_EXT_rgba10x6_formats */
-   if (info->format == VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16) {
-      props->imageFormatProperties.sampleCounts = VK_SAMPLE_COUNT_1_BIT;
-   }
 
    /* sanitize VkExternalMemoryProperties */
    VkExternalImageFormatProperties *external_props =

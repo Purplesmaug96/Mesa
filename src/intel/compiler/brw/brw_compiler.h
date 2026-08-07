@@ -514,13 +514,6 @@ struct brw_stage_prog_data {
    uint64_t source_hash;
 };
 
-/**
- * Convert a number of GRF registers used (grf_used in prog_data) into a
- * number of GRF register blocks supported by the hardware.
- */
-unsigned brw_register_blocks(const struct intel_device_info *devinfo,
-                             unsigned grf_used);
-
 enum brw_pixel_shader_computed_depth_mode {
    BRW_PSCDEPTH_OFF   = 0, /* PS does not compute depth */
    BRW_PSCDEPTH_ON    = 1, /* PS computes depth; no guarantee about value */
@@ -615,6 +608,11 @@ struct brw_fs_prog_data {
     * Shader is ran at the coarse pixel shading dispatch rate (3DSTATE_CPS).
     */
    bool coarse_pixel_dispatch;
+
+   /**
+    * Whether the shader was compiled with a preference for SIMD32.
+    */
+   bool prefer_simd32;
 
    /**
     * Shader writes the SampleMask and this is AND-ed with the API's
@@ -828,6 +826,9 @@ struct brw_cs_prog_data {
 
    /* True if shader has any sample operation */
    bool uses_sampler;
+
+   /* True if the shader was compiled with SIMD32 forced */
+   bool force_simd32;
 
    struct {
       struct brw_push_const_block cross_thread;
