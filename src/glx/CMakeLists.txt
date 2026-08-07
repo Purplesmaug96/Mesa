@@ -115,6 +115,7 @@ endforeach()
 add_library(${gl_lib_name} SHARED "${CMAKE_CURRENT_SOURCE_DIR}/libgl_stub.c")
 set_target_properties(${gl_lib_name} PROPERTIES
   VERSION ${gl_lib_version}
+  SOVERSION 0
   OUTPUT_NAME ${gl_lib_name})
 target_link_libraries(${gl_lib_name} PRIVATE ${_libgl_whole})
 target_link_options(${gl_lib_name} PRIVATE
