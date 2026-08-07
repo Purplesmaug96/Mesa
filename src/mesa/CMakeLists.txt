@@ -457,3 +457,9 @@ target_include_directories(mesa PRIVATE
   "${_gen}/glapi/glapi/gen")
 target_link_libraries(mesa PRIVATE ${_libmesa_links} idep_libglsl idep_nir idep_vtn idep_mesautil)
 add_dependencies(mesa ${_libmesa_gen_targets})
+
+# forward generator outputs up to src/ for glx/egl (meson: subdirs share scope)
+set(main_dispatch_h "${main_dispatch_h}" PARENT_SCOPE)
+set(glx_generated "${glx_generated}" PARENT_SCOPE)
+set(glx_indirect_size_h "${glx_indirect_size_h}" PARENT_SCOPE)
+set(inc_glapi "${inc_glapi}" PARENT_SCOPE)

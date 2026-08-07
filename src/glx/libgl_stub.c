@@ -1,0 +1,1 @@
+/* Intentional empty TU: libGL is built entirely via --whole-archive of libglx */

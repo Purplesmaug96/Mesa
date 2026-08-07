@@ -17,7 +17,7 @@ foreach(_v
     main_api_exec_decl_h main_api_save_init_h main_api_save_h
     main_api_beginend_init_h main_api_hw_select_init_h main_dispatch_h
     main_marshal_generated_h main_unmarshal_table_c main_api_trace_c
-    main_marshal_generated_c glx_generated glx_indirect_size_h)
+    main_marshal_generated_c glx_generated glx_indirect_size_h inc_glapi)
   set(${_v} "${${_v}}" PARENT_SCOPE)
 endforeach()
 set(idep_dispatch_h idep_dispatch_h PARENT_SCOPE)

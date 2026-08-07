@@ -46,18 +46,52 @@ target_include_directories(${libgallium_name} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../../frontends/dri")
 target_link_options(${libgallium_name} PRIVATE
   ${ld_args_build_id} ${ld_args_gc_sections} ${gallium_dri_ld_args})
+# meson link_whole: libdri first so its st_*/loader_* references pull
+# members from the following static libs (mesa, gallium, ...). All local
+# archives go in one --start-group so mutual references resolve regardless of
+# order; explicit paths keep CMake from reordering target items out of it.
+set(_gl_ring
+  "${CMAKE_BINARY_DIR}/src/gallium/drivers/softpipe/libsoftpipe.a"
+  "${CMAKE_BINARY_DIR}/src/mesa/libmesa.a"
+  "${CMAKE_BINARY_DIR}/src/gallium/auxiliary/libgalliumvl.a"
+  "${CMAKE_BINARY_DIR}/src/gallium/auxiliary/libgallium.a"
+  "${CMAKE_BINARY_DIR}/src/mesa/glapi/shared-glapi/libglapi.a"
+  "${CMAKE_BINARY_DIR}/src/gallium/auxiliary/pipe-loader/libpipe_loader_static.a"
+  "${CMAKE_BINARY_DIR}/src/gallium/winsys/sw/null/libws_null.a"
+  "${CMAKE_BINARY_DIR}/src/gallium/winsys/sw/wrapper/libwsw.a"
+  "${CMAKE_BINARY_DIR}/src/gallium/winsys/sw/dri/libswdri.a"
+  "${CMAKE_BINARY_DIR}/src/util/blake3/libblake3.a"
+  "${CMAKE_BINARY_DIR}/src/mesa/libmesa_sse41.a"
+  "${CMAKE_BINARY_DIR}/src/compiler/glsl/libglsl.a"
+  "${CMAKE_BINARY_DIR}/src/compiler/glsl/glcpp/libglcpp.a"
+  "${CMAKE_BINARY_DIR}/src/compiler/spirv/libvtn.a"
+  "${CMAKE_BINARY_DIR}/src/util/libxmlconfig.a"
+  "${CMAKE_BINARY_DIR}/src/loader/libloader.a"
+  "${CMAKE_BINARY_DIR}/src/compiler/nir/libnir.a"
+  "${CMAKE_BINARY_DIR}/src/util/libmesa_util.a"
+  "${CMAKE_BINARY_DIR}/src/util/libmesa_util_clflush.a"
+  "${CMAKE_BINARY_DIR}/src/util/libmesa_util_simd.a"
+  "${CMAKE_BINARY_DIR}/src/c11/impl/libmesa_util_c11.a"
+  "${CMAKE_BINARY_DIR}/src/compiler/libcompiler.a")
+if(with_gallium_drisw_kms)
+  list(APPEND _gl_ring "${CMAKE_BINARY_DIR}/src/gallium/winsys/sw/kms-dri/libswkmsdri.a")
+endif()
+if(with_gallium_va)
+  list(APPEND _gl_ring
+    "${CMAKE_BINARY_DIR}/src/gallium/auxiliary/vl/libgalliumvlwinsys.a"
+    "${CMAKE_BINARY_DIR}/src/gallium/frontends/va/libva_st.a")
+endif()
+
 target_link_libraries(${libgallium_name} PRIVATE
-  mesa galliumvl gallium glapi pipe_loader_static ws_null wsw swdri ${libswkmsdri}
-  ${gallium_dri_link_with}
-  ${dep_libdrm} ${dep_llvm} ${dep_thread} idep_xmlconfig idep_mesautil
-  ${driver_swrast}
-  ${gallium_dri_link_whole})
-# meson link_whole: libdri must be linked with --whole-archive
-target_link_libraries(${libgallium_name} PRIVATE
-  -Wl,--whole-archive dri -Wl,--no-whole-archive)
+  -Wl,--whole-archive dri -Wl,--no-whole-archive
+  -Wl,--start-group ${_gl_ring} -Wl,--end-group
+  ${gallium_dri_link_whole}
+  ${dep_libdrm} ${dep_llvm} ${dep_thread} ${dep_spirv_tools} idep_xmlconfig idep_mesautil)
 set_property(TARGET ${libgallium_name} APPEND PROPERTY LINK_DEPENDS ${gallium_dri_link_depends})
 set_target_properties(${libgallium_name} PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/src/gallium/targets/dri")
 install(TARGETS ${libgallium_name} LIBRARY DESTINATION "${libdir}")
 
 set(shared_glapi_lib "${libgallium_name}")
+set(libgallium_dri "${libgallium_name}" PARENT_SCOPE)
+set(shared_glapi_lib "${libgallium_name}" PARENT_SCOPE)
