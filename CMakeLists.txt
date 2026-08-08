@@ -14,7 +14,26 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# The xbox360 backend is a statically-linked PE/XEX archive; there are no
+# shared objects on the console, so PIC is unnecessary.  The ppc32-xbox360
+# clang backend cannot emit PIC code at -O3 (fatal assembler errors), so
+# disable it when building for the Xbox 360.
+set(_mesa_need_pic ON)
+if(CMAKE_SYSTEM_NAME STREQUAL "Generic" AND CMAKE_SYSTEM_VERSION STREQUAL "xbox360")
+  set(_mesa_need_pic OFF)
+endif()
+set(CMAKE_POSITION_INDEPENDENT_CODE ${_mesa_need_pic})
+if(NOT _mesa_need_pic)
+  # Some targets set POSITION_INDEPENDENT_CODE ON directly; neutralise the
+  # -fPIC those would imply so the ppc32-xbox360 clang backend (which cannot
+  # emit PIC at -O3) builds cleanly.
+  set(CMAKE_C_COMPILE_OPTIONS_PIC "")
+  set(CMAKE_CXX_COMPILE_OPTIONS_PIC "")
+  set(CMAKE_ASM_COMPILE_OPTIONS_PIC "")
+  # Newlib has no top-level <endian.h>, so u_endian.h cannot detect endianness
+  # on this target.  The PowerPC 32-bit Xbox 360 CPU is big-endian.
+  add_compile_definitions(UTIL_ARCH_LITTLE_ENDIAN=0 UTIL_ARCH_BIG_ENDIAN=1)
+endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(CheckCSourceCompiles)
@@ -53,6 +72,9 @@ set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInf
 option(MESA_OP_OPENGL "Build support for desktop OpenGL" ON)
 option(MESA_OP_SSE2 "Enable SSE2 optimizations (x86)" OFF)
 option(MESA_OP_BUILD_TESTS "Build unit tests" OFF)
+# enable_testing() unconditionally: unit tests are not ported yet, but the
+# glx libGL-ABI-check (and any future add_test) must be discoverable by ctest.
+enable_testing()
 option(MESA_OP_GLX_READ_ONLY_TEXT "Enable GLX X86 read-only text" OFF)
 option(MESA_OP_GLX_DIRECT "Enable GLX direct rendering" ON)
 option(MESA_OP_SHADER_CACHE_DEFAULT "Shader cache enabled by default" ON)
@@ -378,6 +400,15 @@ endif()
 if("${gallium_drivers}" MATCHES "(^|;)ethosu(;|$)")
   set(with_gallium_ethosu ON)
 endif()
+# xbox360: the Xbox 360 backend.  It is built on top of the softpipe
+# software rasterizer (renders into a system-memory colour buffer that the
+# caller presents to the Xenos scanout path), so selecting it also enables
+# softpipe.
+set(with_gallium_xbox360 OFF)
+if("${gallium_drivers}" MATCHES "(^|;)xbox360(;|$)")
+  set(with_gallium_xbox360 ON)
+  set(with_gallium_softpipe ON)
+endif()
 set(with_gallium_swrast OFF)
 if(with_gallium_softpipe OR with_gallium_llvmpipe)
   set(with_gallium_swrast ON)
@@ -482,6 +513,15 @@ endif()
 if(amd_with_llvm STREQUAL "AUTO" OR amd_with_llvm STREQUAL "auto" OR amd_with_llvm STREQUAL "")
   set(amd_with_llvm AUTO)
 endif()
+# Normalize tri-state strings so "enabled"/"disabled" become real booleans
+# instead of non-empty strings (which CMake treats as truthy).
+foreach(_op with_llvm draw_with_llvm amd_with_llvm)
+  if(${_op} STREQUAL "ON" OR ${_op} STREQUAL "enabled" OR ${_op} STREQUAL "enabled")
+    set(${_op} ON)
+  elseif(${_op} STREQUAL "disabled" OR NOT ${_op})
+    set(${_op} OFF)
+  endif()
+endforeach()
 
 # tools
 set(with_tools "${MESA_OP_TOOLS}")
@@ -546,7 +586,8 @@ endif()
 mesa_feature(GBM "${MESA_OP_GBM}" "gbm")
 set(with_gbm "${MESA_OP_GBM}")
 mesa_feature(GLVND "${MESA_OP_GLVND}" "glvnd")
-set(with_glvnd AUTO)
+set(with_glvnd "${MESA_OP_GLVND}")
+mesa_feature_found(with_glvnd)
 mesa_feature(XMLCONFIG "${MESA_OP_XMLCONFIG}" "xmlconfig")
 set(with_xmlconfig AUTO)
 
@@ -694,11 +735,6 @@ endif()
 if(system_has_kms_drm)
   add_compile_definitions(-DMESA_SYSTEM_HAS_KMS_DRM=1)
 endif()
-if(with_glvnd)
-  add_compile_definitions(-DUSE_LIBGLVND=1)
-else()
-  add_compile_definitions(-DUSE_LIBGLVND=0)
-endif()
 if(with_mesa_ndebug)
   add_compile_definitions(-DNDEBUG)
 endif()
@@ -794,6 +830,14 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/mesa-checks.cmake")
 # ---------------------------------------------------------------------------
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/mesa-deps.cmake")
 
+# Mesa-deps finalizes with_glvnd (ON when libglvnd is found) AFTER the feature
+# block above, so the pre_args define must be emitted here to stay in sync.
+if(with_glvnd)
+  add_compile_definitions(-DUSE_LIBGLVND=1)
+else()
+  add_compile_definitions(-DUSE_LIBGLVND=0)
+endif()
+
 # ---------------------------------------------------------------------------
 # misc options that modify pre_args after deps (shader cache etc.)
 # ---------------------------------------------------------------------------
@@ -803,7 +847,9 @@ if(MESA_OP_SHADER_CACHE STREQUAL "enabled")
 elseif(MESA_OP_SHADER_CACHE STREQUAL "disabled")
   set(with_shader_cache OFF)
 else()
-  set(with_shader_cache ON)
+  # "auto": on-disk shader caching needs a compression backend (zlib or
+  # zstd); cross builds without either must silently fall back to no cache.
+  set(with_shader_cache ${with_compression})
 endif()
 if(with_shader_cache)
   add_compile_definitions(-DENABLE_SHADER_CACHE)

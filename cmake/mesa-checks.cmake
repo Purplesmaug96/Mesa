@@ -251,7 +251,12 @@ set(CMAKE_REQUIRED_FLAGS "-Wl,--gc-sections")
 check_c_source_compiles("int main() { return 0; }" HAVE_GC_SECTIONS)
 set(CMAKE_REQUIRED_FLAGS "")
 if(HAVE_GC_SECTIONS)
-  add_compile_options(-ffunction-sections -fdata-sections)
+  # -fdata-sections trips the ppc32-xbox360 assembler ("cannot make section
+  # .rdata associative..."), so keep the sections flags to the ELF (host)
+  # builds; _mesa_need_pic is OFF exactly for the console target.
+  if(_mesa_need_pic)
+    add_compile_options(-ffunction-sections -fdata-sections)
+  endif()
   add_compile_definitions(-DHAVE_GC_SECTIONS)  # placeholder, not used
 endif()
 set(with_ld_version_script ON)
@@ -281,7 +286,11 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
   check_symbol_exists(dlopen "dlfcn.h" __mesa_dlopen)
   if(NOT __mesa_dlopen)
     set(MESA_DL_LIB "dl")
-    link_libraries(dl)
+    # The bare-metal xbox360 target has no dl library and no dynamic
+    # loading at all, so only add -ldl for hosted targets.
+    if(NOT CMAKE_CROSSCOMPILING)
+      link_libraries(dl)
+    endif()
   endif()
   check_symbol_exists(dladdr "dlfcn.h" HAVE_DLADDR)
   if(HAVE_DLADDR)
@@ -294,7 +303,19 @@ if(HAVE_DL_ITERATE_PHDR)
 endif()
 
 # threads
-find_package(Threads REQUIRED)
+# When cross-compiling to a bare-metal target there is no pthread library
+# for CMake to probe; OpenXeChain ships a small single-threaded pthread
+# shim (libpthread.a, see the toolchain) that satisfies the symbols at
+# final link time, so just provide the Threads::Threads interface.
+if(CMAKE_CROSSCOMPILING)
+  set(THREADS_FOUND TRUE CACHE BOOL "bare-metal target: pthread shim" FORCE)
+  set(CMAKE_THREAD_LIBS_INIT "" CACHE STRING "bare-metal target: no thread flags" FORCE)
+  if(NOT TARGET Threads::Threads)
+    add_library(Threads::Threads INTERFACE IMPORTED)
+  endif()
+else()
+  find_package(Threads REQUIRED)
+endif()
 add_compile_definitions(-DHAVE_PTHREAD)
 set(CMAKE_REQUIRED_LIBRARIES "${CMAKE_THREAD_LIBS_INIT}")
 set(CMAKE_REQUIRED_DEFINITIONS "-D_GNU_SOURCE")
@@ -312,7 +333,7 @@ find_library(M_LIB m)
 
 # clock
 check_symbol_exists(clock_gettime "time.h" __mesa_clock_gettime)
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows" AND NOT __mesa_clock_gettime)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows" AND NOT __mesa_clock_gettime AND NOT CMAKE_CROSSCOMPILING)
   find_library(RT_LIB rt)
 endif()
 

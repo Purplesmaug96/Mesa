@@ -81,6 +81,8 @@
 #elif DETECT_OS_FUCHSIA
 #include <unistd.h>
 #include <zircon/syscalls.h>
+#elif DETECT_OS_XBOX360
+#  include <unistd.h>
 #else
 #error unexpected platform in os_sysinfo.c
 #endif
@@ -407,6 +409,9 @@ os_get_total_physical_memory(uint64_t *size)
 #elif DETECT_OS_FUCHSIA
    *size = zx_system_get_physmem();
    return true;
+#elif DETECT_OS_XBOX360
+   *size = 0;
+   return false;
 #else
 #error unexpected platform in os_misc.c
    return false;
@@ -506,6 +511,9 @@ os_get_page_size(uint64_t *size)
    return true;
 #elif DETECT_OS_APPLE
    *size = PAGE_SIZE;
+   return true;
+#elif DETECT_OS_XBOX360
+   *size = 4096;
    return true;
 #else
 #error unexpected platform in os_sysinfo.c

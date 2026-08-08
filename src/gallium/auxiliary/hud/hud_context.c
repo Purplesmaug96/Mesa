@@ -2078,7 +2078,7 @@ hud_create(struct cso_context *cso, struct hud_context *share,
    list_inithead(&hud->pane_list);
 
    /* setup sig handler once for all hud contexts */
-#if DETECT_OS_POSIX
+#if DETECT_OS_POSIX && !DETECT_OS_XBOX360
    if (!sig_handled && signo != 0) {
       action.sa_sigaction = &signal_visible_handler;
       action.sa_flags = SA_SIGINFO;

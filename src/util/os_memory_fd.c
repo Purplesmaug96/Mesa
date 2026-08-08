@@ -34,7 +34,9 @@
 #include <linux/fcntl.h>
 #endif
 
-#if DETECT_OS_POSIX
+/* The Xbox 360 has no memfd/SHM-ANON mechanism (and Newlib has no
+ * sys/mman.h), so nothing from this file is usable there. */
+#if DETECT_OS_POSIX && !DETECT_OS_XBOX360
 
 #include <string.h>
 #include <fcntl.h>

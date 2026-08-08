@@ -40,6 +40,12 @@ add_library(${libgallium_name} SHARED "${CMAKE_CURRENT_SOURCE_DIR}/dri_target.c"
 set_target_properties(${libgallium_name} PROPERTIES
   C_VISIBILITY_PRESET hidden
   OUTPUT_NAME ${libgallium_name})
+target_compile_options(${libgallium_name} PRIVATE ${gallium_dri_c_args})
+# meson driver_<name> deps propagate -DGALLIUM_<NAME> compile args
+foreach(_d IN LISTS gallium_drivers)
+  string(TOUPPER "${_d}" _du)
+  target_compile_options(${libgallium_name} PRIVATE "-DGALLIUM_${_du}")
+endforeach()
 target_include_directories(${libgallium_name} PRIVATE
   "${inc_include}" "${inc_src}" "${inc_mesa}" "${inc_gallium}" "${inc_gallium_aux}"
   "${inc_util}" "${inc_gallium_drivers}" "${inc_gallium_winsys}"

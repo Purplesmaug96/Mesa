@@ -321,6 +321,20 @@ list(APPEND libmesa_util_links mesa_util_simd)
 
 # _libmesa_util
 set(_util_srcs)
+# The xbox360 toolchain has no C++ standard library (and no dlfcn.h), so
+# drop TUs that depend on them: u_qsort.cpp uses std::thread, the ASTC
+# compressor uses the STL, and u_dl.c wraps dlopen/dlsym.  None of these
+# are used by the softpipe-based console backend. (_mesa_need_pic is OFF
+# exactly when building for the console.)
+if(NOT _mesa_need_pic)
+  list(REMOVE_ITEM files_mesa_util
+       u_qsort.cpp u_qsort.h
+       texcompress_astc.cpp texcompress_astc.h
+       texcompress_astc_luts.cpp texcompress_astc_luts.h
+       texcompress_astc_luts_wrap.cpp texcompress_astc_luts_wrap.h
+       u_dl.c u_dl.h)
+  list(APPEND files_mesa_util texcompress_astc_luts_stub.c)
+endif()
 foreach(_f IN LISTS files_mesa_util)
   if(IS_ABSOLUTE "${_f}")
     list(APPEND _util_srcs "${_f}")

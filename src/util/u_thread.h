@@ -50,6 +50,13 @@
  * but not with __thread
  */
 #define __THREAD_INITIAL_EXEC __thread
+#elif DETECT_OS_XBOX360
+/* The console is single-threaded: the initial-exec TLS model has no
+ * runtime support, and COFF targets cannot share the per-TU "tls init
+ * routine" symbols, which makes every TU that references the variable a
+ * duplicate-symbol at link time.  A plain global is the correct model.
+ */
+#define __THREAD_INITIAL_EXEC
 #elif defined(__GLIBC__)
 #define __THREAD_INITIAL_EXEC thread_local __attribute__((tls_model("initial-exec")))
 #define REALLY_INITIAL_EXEC

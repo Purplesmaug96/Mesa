@@ -132,3 +132,20 @@ set_target_properties(${gl_lib_name} PROPERTIES
 install(TARGETS ${gl_lib_name} LIBRARY DESTINATION "${libdir}")
 
 set(libgl "${gl_lib_name}")
+
+# libGL ABI check (meson: with_symbols_check, symbols_check_args)
+find_program(symbols_check_nm nm)
+if(symbols_check_nm)
+  if(with_glvnd)
+    set(libgl_symbols_file "${CMAKE_CURRENT_SOURCE_DIR}/glvnd-symbols.txt")
+  else()
+    set(libgl_symbols_file "${CMAKE_CURRENT_SOURCE_DIR}/libgl-symbols.txt")
+  endif()
+  add_test(NAME libGL-ABI-check
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_SOURCE_DIR}/bin/symbols-check.py"
+            --lib "$<TARGET_FILE:${gl_lib_name}>"
+            --symbols-file "${libgl_symbols_file}"
+            --nm "${symbols_check_nm}")
+  set_tests_properties(libGL-ABI-check PROPERTIES LABELS "glx")
+endif()

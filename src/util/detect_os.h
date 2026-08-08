@@ -91,6 +91,13 @@
 #define DETECT_OS_POSIX 1
 #endif
 
+/* Xbox 360: a POSIX-flavoured (Newlib) environment.  The toolchain ships a
+ * single-threaded pthread shim and a syslog stub so POSIX code paths work. */
+#if defined(_XBOX) || defined(__XBOX__)
+#define DETECT_OS_XBOX360 1
+#define DETECT_OS_POSIX 1
+#endif
+
 
 /*
  * Make sure DETECT_OS_* are always defined, so that they can be used with #if

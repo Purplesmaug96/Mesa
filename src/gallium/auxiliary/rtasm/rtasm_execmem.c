@@ -47,7 +47,7 @@
 #include <windows.h>
 #endif
 
-#if DETECT_OS_POSIX
+#if DETECT_OS_POSIX && !DETECT_OS_XBOX360
 
 
 /*
