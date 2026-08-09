@@ -17,6 +17,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include <xecore/xboxkrnl.h>
+
 #include "util/box.h"
 #include "util/u_memory.h"
 #include "util/u_inlines.h"
@@ -197,11 +199,14 @@ xbox360_create(struct xbox360_display **out, uint32_t width, uint32_t height)
       return false;
    }
 
+   DbgPrint("xbox360_create: null_sw ok");
+
    d->fscreen.screen = softpipe_create_screen(ws);
    if (!d->fscreen.screen) {
       free(d);
       return false;
    }
+   DbgPrint("xbox360_create: softpipe screen ok");
    d->fscreen.get_param = xbox360_get_param;
 
    d->width = width;
@@ -229,12 +234,18 @@ xbox360_create(struct xbox360_display **out, uint32_t width, uint32_t height)
    attribs.minor = 3;
    attribs.visual = d->visual;
 
+   DbgPrint("xbox360_create: creating st context (GL %u.%u compat)...",
+            attribs.major, attribs.minor);
+
    d->context = st_api_create_context(&d->fscreen, &attribs, &sterr, NULL);
    if (!d->context) {
+      DbgPrint("xbox360_create: st_api_create_context failed (sterr=%d)",
+               (int)sterr);
       d->fscreen.screen->destroy(d->fscreen.screen);
       free(d);
       return false;
    }
+   DbgPrint("xbox360_create: st_context ok");
 
    *out = d;
    return true;
