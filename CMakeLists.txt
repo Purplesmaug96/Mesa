@@ -409,6 +409,16 @@ if("${gallium_drivers}" MATCHES "(^|;)xbox360(;|$)")
   set(with_gallium_xbox360 ON)
   set(with_gallium_softpipe ON)
 endif()
+# xbox360: util_cpu_detect probes the CPU with an xxland (VSX) instruction to
+# check whether VSX exists.  Real consoles execute it and handle the resulting
+# SIGILL; emulators whose guest decoder does not implement the VSX opcode
+# (0x3C) cannot even disassemble it.  When this option is OFF the probe is
+# compiled out (and has_vsx stays 0), so the binary is safe for such
+# environments; real hardware builds keep the default ON.
+option(X360_CPU_PROBE_VSX "xbox360: emit the xxland VSX CPU probe in util_cpu_detect" ON)
+if(with_gallium_xbox360 AND NOT X360_CPU_PROBE_VSX)
+  add_compile_definitions(-DXBOX360_NO_VSX_PROBE)
+endif()
 set(with_gallium_swrast OFF)
 if(with_gallium_softpipe OR with_gallium_llvmpipe)
   set(with_gallium_swrast ON)

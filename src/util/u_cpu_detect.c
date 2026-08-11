@@ -220,10 +220,19 @@ check_os_altivec_support(void)
 
          util_cpu_caps.has_altivec = 1;
 
+#ifdef XBOX360_NO_VSX_PROBE
+         /* The xxland probe below decodes to the VSX opcode (0x3C), which
+          * emulators such as xenia cannot disassemble; compiled out by the
+          * toolchain build setting X360_CPU_PROBE_VSX=OFF.  Real consoles
+          * execute it and eat the SIGILL, so the default keeps it in.
+          */
+         (void)enable_vsx;
+#else
          if (enable_vsx) {
             __asm __volatile("xxland %vs0, %vs0, %vs0");
             util_cpu_caps.has_vsx = 1;
          }
+#endif
          signal(SIGILL, SIG_DFL);
       } else {
          util_cpu_caps.has_altivec = 0;
