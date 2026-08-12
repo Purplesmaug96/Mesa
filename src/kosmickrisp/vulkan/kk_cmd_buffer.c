@@ -76,6 +76,9 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
       container_of(vk_cmd_buffer, struct kk_cmd_buffer, vk);
    struct kk_cmd_pool *pool = kk_cmd_buffer_pool(cmd);
 
+   if (cmd->drawable)
+      mtl_release(cmd->drawable);
+
    mtl_release(cmd->argument_table);
    kk_destroy_encoder_state(&cmd->cmp[0]);
    kk_destroy_encoder_state(&cmd->cmp[1]);
@@ -878,4 +881,22 @@ kk_apply_attachment_store_ops(struct kk_cmd_buffer *cmd, bool force_store)
                  render->stencil_att.store_op);
       mtl_render_set_stencil_store_action(encoder, store_action);
    }
+}
+
+/* VK_AMD_buffer_marker */
+
+VKAPI_ATTR void VKAPI_CALL
+kk_CmdWriteMarkerToMemoryAMD(VkCommandBuffer commandBuffer,
+                             const VkMemoryMarkerInfoAMD *pInfo)
+{
+   VK_FROM_HANDLE(kk_cmd_buffer, cmd_buffer, commandBuffer);
+   struct libkk_imm_write write;
+
+   /* Kosmickrisp doesn't have fine grained barriers.
+    * This should handle all pipeline stages. */
+   cs_end(cmd_buffer);
+
+   write.value = pInfo->marker;
+   write.address = pInfo->dstRange.address;
+   kk_cmd_write(cmd_buffer, write);
 }

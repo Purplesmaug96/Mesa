@@ -192,17 +192,17 @@ anv_get_robust_flags(const struct vk_pipeline_robustness_state *rstate)
        BRW_ROBUSTNESS_UBO : 0);
 }
 
-static enum anv_descriptor_set_layout_type
+static enum anv_shader_binding_mode
 set_layouts_get_layout_type(struct anv_descriptor_set_layout * const *set_layouts,
                             uint32_t set_layout_count)
 {
    for (uint32_t s = 0; s < set_layout_count; s++) {
       if (set_layouts[s]) {
-         return set_layouts[s]->type;
+         return set_layouts[s]->binding_mode;
       }
    }
 
-   return ANV_PIPELINE_DESCRIPTOR_SET_LAYOUT_TYPE_UNKNOWN;
+   return ANV_SHADER_BINDING_MODE_UNKNOWN;
 }
 
 void
@@ -991,7 +991,8 @@ wa_18019110168_load_provoking_vertex(nir_builder *b, void *data)
    nir_def *val = NULL;
 
    for (uint32_t i = 0; i < bind_map->inline_dwords_count; i++) {
-      if (bind_map->inline_dwords[i] == anv_drv_const_dword(gfx.wa_18019110168)) {
+      if (bind_map->inline_dwords[i] ==
+          anv_drv_const_dword(drv_data.gfx.wa_18019110168)) {
          val = nir_load_inline_data_intel(
             b, 1, 32, nir_imm_int(b, 0),
             .base = i * 4);
@@ -1001,9 +1002,9 @@ wa_18019110168_load_provoking_vertex(nir_builder *b, void *data)
 
    if (val == NULL) {
       val = nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
-                                     .base = anv_drv_const_offset(gfx.wa_18019110168) -
+                                     .base = anv_drv_const_offset(drv_data.gfx.wa_18019110168) -
                                              bind_map->push_ranges[0].start * 32,
-                                     .range = anv_drv_const_size(gfx.wa_18019110168));
+                                     .range = anv_drv_const_size(drv_data.gfx.wa_18019110168));
    }
 
    return nir_iand_imm(b, val, ANV_WA_18019110168_PROVOKING_VERTEX_MASK);
@@ -1016,9 +1017,9 @@ wa_18019110168_load_per_primitive_remap_table(nir_builder *b, void *data)
    nir_def *val = NULL;
 
    val = nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
-                                  .base = anv_drv_const_offset(gfx.wa_18019110168) -
+                                  .base = anv_drv_const_offset(drv_data.gfx.wa_18019110168) -
                                           bind_map->push_ranges[0].start * 32,
-                                  .range = anv_drv_const_size(gfx.wa_18019110168));
+                                  .range = anv_drv_const_size(drv_data.gfx.wa_18019110168));
 
    return nir_iand_imm(b, val, ANV_WA_18019110168_PER_PRIMITIVE_REMAP_TABLE_OFFSET_MASK);
 }
@@ -1624,7 +1625,7 @@ anv_shader_lower_nir(struct anv_device *device,
 
    if (!(shader_data->info->flags & VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT)) {
       NIR_PASS(_, nir, anv_nir_lower_resource_intel, pdevice,
-                  shader_data->bind_map.layout_type);
+                  shader_data->bind_map.binding_mode);
    }
 
    shader_data->push_desc_info.push_set_buffer =
@@ -1994,6 +1995,11 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
       reloc_count += resume_prog_data[i].base.num_relocs + 1;
    }
 
+   /* Copy resource requirements accumulated across all resume shaders. */
+   prog_data->base.total_scratch = main_prog_data.base.total_scratch;
+   prog_data->bs.max_stack_size = main_prog_data.bs.max_stack_size;
+   prog_data->base.has_ubo_pull = main_prog_data.base.has_ubo_pull;
+
    /* Allocate the relocs array once, sized for the whole thing. */
    struct intel_shader_reloc *relocs =
       ralloc_array(mem_ctx, struct intel_shader_reloc, reloc_count);
@@ -2162,7 +2168,7 @@ anv_shader_compile(struct vk_device *vk_device,
             info->set_layouts[i]->dynamic_descriptor_count : 0;
       }
 
-      shader_data->bind_map.layout_type =
+      shader_data->bind_map.binding_mode =
          set_layouts_get_layout_type((struct anv_descriptor_set_layout * const *)info->set_layouts,
                                      info->set_layout_count);
       shader_data->bind_map.surface_to_descriptor =

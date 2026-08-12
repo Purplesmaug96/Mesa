@@ -441,8 +441,8 @@ etna_emit_state(struct etna_context *ctx)
    if (unlikely(dirty & (ETNA_DIRTY_SCISSOR_CLIP))) {
       /*00C00*/ EMIT_STATE_FIXP(SE_SCISSOR_LEFT, ctx->clipping.minx << 16);
       /*00C04*/ EMIT_STATE_FIXP(SE_SCISSOR_TOP, ctx->clipping.miny << 16);
-      /*00C08*/ EMIT_STATE_FIXP(SE_SCISSOR_RIGHT, (ctx->clipping.maxx << 16) + ETNA_SE_SCISSOR_MARGIN_RIGHT);
-      /*00C0C*/ EMIT_STATE_FIXP(SE_SCISSOR_BOTTOM, (ctx->clipping.maxy << 16) + ETNA_SE_SCISSOR_MARGIN_BOTTOM);
+      /*00C08*/ EMIT_STATE_FIXP(SE_SCISSOR_RIGHT, MIN2((ctx->clipping.maxx << 16) + ETNA_SE_SCISSOR_MARGIN_RIGHT, ETNA_SE_FIXP_MAX));
+      /*00C0C*/ EMIT_STATE_FIXP(SE_SCISSOR_BOTTOM, MIN2((ctx->clipping.maxy << 16) + ETNA_SE_SCISSOR_MARGIN_BOTTOM, ETNA_SE_FIXP_MAX));
    }
    if (unlikely(dirty & (ETNA_DIRTY_RASTERIZER))) {
       /*00C10*/ EMIT_STATE(SE_DEPTH_SCALE, etna_rasterizer_state(ctx->rasterizer)->SE_DEPTH_SCALE);
@@ -605,34 +605,64 @@ etna_emit_state(struct etna_context *ctx)
          for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
             const uint8_t rt = i - 1;
             /*01500*/ EMIT_STATE_RELOC(PE_RT_ADDR_4_PIPE(rt, 0), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
-            /*01520*/ EMIT_STATE_RELOC(PE_RT_ADDR_4_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][1]);
+            /*01504*/ EMIT_STATE_RELOC(PE_RT_ADDR_4_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][1]);
+         }
+         for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+            const uint8_t rt = i - 1;
             /*01580*/ EMIT_STATE(PE_RT_CONFIG_4(rt), ctx->framebuffer.PE_RT_CONFIG[rt]);
          }
       } else if (screen->specs.num_rts == 8) {
          for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
             const uint8_t rt = i - 1;
             /*14800*/ EMIT_STATE_RELOC(PE_RT_ADDR_8_PIPE(rt, 0), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
-            /*14800*/ EMIT_STATE_RELOC(PE_RT_ADDR_8_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][1]);
+            /*14804*/ EMIT_STATE_RELOC(PE_RT_ADDR_8_PIPE(rt, 1), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][1]);
+         }
+         for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+            const uint8_t rt = i - 1;
             /*14900*/ EMIT_STATE(PE_RT_CONFIG_8(rt), ctx->framebuffer.PE_RT_CONFIG[rt]);
          }
       }
    }
 
    if (unlikely(dirty & (ETNA_DIRTY_FRAMEBUFFER | ETNA_DIRTY_TS))) {
+      /* Index 0 is not used by the binary blob. */
       for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
          const uint8_t rt = i - 1;
-         /* Index 0 is not used by the binary blob. */
-         EMIT_STATE(TS_RT_CONFIG(i), ctx->framebuffer.RT_TS_MEM_CONFIG[rt]);
-         EMIT_STATE(TS_RT_CLEAR_VALUE(i), ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE[rt]);
-         EMIT_STATE(TS_RT_CLEAR_VALUE2(i), ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE_EXT[rt]);
-         EMIT_STATE_RELOC(TS_RT_STATUS_BASE(i), &ctx->framebuffer.RT_TS_COLOR_STATUS_BASE[rt]);
-         EMIT_STATE_RELOC(TS_RT_SURFACE_BASE(i), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
+         /*017A0*/ EMIT_STATE(TS_RT_CONFIG(i), ctx->framebuffer.RT_TS_MEM_CONFIG[rt]);
+      }
+      for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+         const uint8_t rt = i - 1;
+         /*017C0*/ EMIT_STATE_RELOC(TS_RT_STATUS_BASE(i), &ctx->framebuffer.RT_TS_COLOR_STATUS_BASE[rt]);
+      }
+      for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+         /*017E0*/ EMIT_STATE_RELOC(TS_RT_SURFACE_BASE(i), &ctx->framebuffer.PE_RT_PIPE_COLOR_ADDR[i][0]);
+      }
+      for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+         const uint8_t rt = i - 1;
+         /*01A00*/ EMIT_STATE(TS_RT_CLEAR_VALUE(i), ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE[rt]);
+      }
+      for (int i = 1; i < ctx->framebuffer.num_rt; i++) {
+         const uint8_t rt = i - 1;
+         /*01A20*/ EMIT_STATE(TS_RT_CLEAR_VALUE2(i), ctx->framebuffer.RT_TS_COLOR_CLEAR_VALUE_EXT[rt]);
       }
    }
 
    if (unlikely(VIV_FEATURE(screen, ETNA_FEATURE_HWTFB))) {
       if (unlikely(dirty & ETNA_DIRTY_RASTERIZER)) {
          /*1C000*/ EMIT_STATE(TFB_CONFIG, etna_rasterizer_state(ctx->rasterizer)->TFB_CONFIG);
+      }
+
+      if (unlikely(dirty & ETNA_DIRTY_STREAMOUT_CMD)) {
+         struct etna_streamout *so = &ctx->streamout;
+
+         if (so->xfb_should_be_active && so->xfb_hw_state != ETNA_XFB_HW_ACTIVE) {
+            uint32_t cmd = (so->xfb_hw_state == ETNA_XFB_HW_PAUSED) ?
+                           TFB_COMMAND_RESUME :
+                           TFB_COMMAND_ENABLE;
+
+            /*1C004*/ EMIT_STATE(TFB_COMMAND, cmd);
+            so->xfb_hw_state = ETNA_XFB_HW_ACTIVE;
+         }
       }
 
       if (unlikely(dirty & ETNA_DIRTY_STREAMOUT)) {
@@ -658,19 +688,6 @@ etna_emit_state(struct etna_context *ctx)
 
          for (int i = 0; i < ctx->streamout.num_descriptors; i++) {
             /*1C800*/ EMIT_STATE(TFB_DESCRIPTOR(i), ctx->streamout.TFB_DESCRIPTOR[i]);
-         }
-      }
-
-      if (unlikely(dirty & ETNA_DIRTY_STREAMOUT_CMD)) {
-         struct etna_streamout *so = &ctx->streamout;
-
-         if (so->xfb_should_be_active && so->xfb_hw_state != ETNA_XFB_HW_ACTIVE) {
-            uint32_t cmd = (so->xfb_hw_state == ETNA_XFB_HW_PAUSED) ?
-                           TFB_COMMAND_RESUME :
-                           TFB_COMMAND_ENABLE;
-
-            /*1C004*/ EMIT_STATE(TFB_COMMAND, cmd);
-            so->xfb_hw_state = ETNA_XFB_HW_ACTIVE;
          }
       }
    }

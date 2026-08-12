@@ -363,8 +363,7 @@ jay_emit_alu(struct nir_to_jay_state *nj, nir_alu_instr *alu)
    for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
       unsigned len = nir_src_bit_size(alu->src[i].src) == 64 ? 2 : 1;
       jay_def chans[NIR_MAX_VEC_COMPONENTS];
-      unsigned nr_chans =
-         nir_op_is_vec_or_mov(alu->op) ? 1 : alu->def.num_components;
+      unsigned nr_chans = nir_op_is_vec(alu->op) ? 1 : alu->def.num_components;
       bool all_same = true;
       for (unsigned c = 0; c < nr_chans; ++c) {
          /* Optimize swizzles corresponding to dead channels */
@@ -1333,15 +1332,18 @@ jay_emit_mem_access(struct nir_to_jay_state *nj, nir_intrinsic_instr *intr)
       uniform &= !urb;
    }
 
-   /* Per bspec 57330, 8-bit/16-bit are not supported for transpose */
-   bool transpose = uniform && !cmask && ndata->bit_size >= 32;
+   /* Per bspec 57330, 8-bit/16-bit/unaligned are not supported for transpose */
+   bool transpose = (uniform && !cmask) &&
+                    ndata->bit_size >= 32 &&
+                    (!nir_intrinsic_has_align(intr) ||
+                     nir_intrinsic_align(intr) >= ndata->bit_size / 8);
 
    if (!uniform) {
       offset = jay_as_gpr(b, offset);
       data = jay_as_gpr(b, data);
    } else if (!transpose) {
       offset = jay_src_as_strided(b, offset, a64 ? 2 : 1, UGPR);
-      data = jay_src_as_strided(b, data, 1, UGPR);
+      data = jay_src_as_strided(b, data, ndata->bit_size == 64 ? 2 : 1, UGPR);
    }
 
    unsigned access =
@@ -1424,6 +1426,7 @@ jay_emit_mem_access(struct nir_to_jay_state *nj, nir_intrinsic_instr *intr)
    }
 
    jay_def tmp = dst;
+   unsigned dst_stride = transpose ? 1 : MAX2(ndata->bit_size / 32, 1);
 
    if (dst.file == UGPR) {
       if (transpose) {
@@ -1434,7 +1437,7 @@ jay_emit_mem_access(struct nir_to_jay_state *nj, nir_intrinsic_instr *intr)
       } else {
          /* Without transpose we write at GRF granularity. Pad out. */
          tmp = jay_alloc_def(b, UGPR,
-                             jay_ugpr_per_grf(b->shader) * jay_num_values(dst));
+                             jay_num_values(dst) * jay_ugpr_per_grf(b->shader));
       }
    }
 
@@ -1513,7 +1516,12 @@ jay_emit_mem_access(struct nir_to_jay_state *nj, nir_intrinsic_instr *intr)
             .ex_desc_imm = ex_desc_imm, .skip_helpers = skip_helpers);
 
    if (has_dest && !jay_defs_equivalent(tmp, dst)) {
-      jay_copy_strided(b, dst, tmp, !transpose);
+      unsigned src_stride = transpose ? 1 : jay_ugpr_per_grf(b->shader);
+
+      jay_foreach_comp(dst, i) {
+         unsigned c = ((i / dst_stride) * src_stride) + (i % dst_stride);
+         jay_MOV(b, jay_extract(dst, i), jay_extract(tmp, c));
+      }
    }
 }
 
@@ -2859,11 +2867,9 @@ jay_emit_texture(struct nir_to_jay_state *nj, nir_tex_instr *tex)
             (uint8_t) BITFIELD_MASK(util_last_bit(component_mask));
       }
 
-      /* TODO: Shrink 16-bit textures too. Shrinking is problematic for some
-       * component masks due to 32-bit granularity of ISA registers.
-       */
-      if (tex->def.bit_size != 32 || (jay_debug & JAY_DBG_NOOPT))
+      if (jay_debug & JAY_DBG_NOOPT) {
          component_mask = nir_component_mask(tex->def.num_components);
+      }
 
       /* If we shrunk the destination, we need a temporary */
       if (component_mask != BITFIELD_MASK(tex->def.num_components)) {
@@ -2989,7 +2995,7 @@ jay_emit_texture(struct nir_to_jay_state *nj, nir_tex_instr *tex)
    }
 
    const unsigned msg_type = brw_get_sampler_hw_opcode(op);
-   bool is_16 = false; /* TODO */
+   bool is_16 = tex->def.bit_size == 16;
    unsigned ret_type = is_16 ? GFX8_SAMPLER_RETURN_FORMAT_16BITS :
                                GFX8_SAMPLER_RETURN_FORMAT_32BITS;
 
@@ -3036,10 +3042,11 @@ jay_emit_texture(struct nir_to_jay_state *nj, nir_tex_instr *tex)
    }
 
    enum jay_type src_type = jay_type(JAY_TYPE_U, payload_type_bit_size);
+   enum jay_type dst_type = jay_type(JAY_TYPE_U, tex->def.bit_size);
    jay_SEND(b, .sfid = GEN_SFID_SAMPLER, .msg_desc = desc, .desc = desc_src,
             .ex_desc = desc_ex_src, .header = header, .srcs = payload,
-            .nr_srcs = n_sources, .type = JAY_TYPE_U32,
-            .src_type = { src_type }, .dst = tmp, .uniform = payload_uniform,
+            .nr_srcs = n_sources, .type = dst_type, .src_type = { src_type },
+            .dst = tmp, .uniform = payload_uniform,
             .bindless = surface_bindless, .pure = true,
             .skip_helpers = tex->skip_helpers);
 
@@ -4102,6 +4109,8 @@ jay_compile_simd(const struct intel_device_info *devinfo,
 {
    jay_debug = debug_get_option_jay_debug();
    bool debug =
+      (!intel_shader_dump_filter ||
+       intel_shader_dump_filter == prog_data->base.source_hash) &&
       INTEL_DEBUG(intel_debug_flag_for_shader_stage(nir->info.stage)) &&
       (!nir->info.internal || NIR_DEBUG(PRINT_INTERNAL));
 
@@ -4372,7 +4381,7 @@ jay_compile(const struct intel_device_info *devinfo,
        * spilling. In the future we could consider more heuristics but for now
        * this should suffice.
        */
-      if (jv->bin && nir->info.stage != MESA_SHADER_FRAGMENT) {
+      if (jv->bin && orig_nir->info.stage != MESA_SHADER_FRAGMENT) {
          break;
       }
    }

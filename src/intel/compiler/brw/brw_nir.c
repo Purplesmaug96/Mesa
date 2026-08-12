@@ -1022,17 +1022,11 @@ brw_nir_should_vectorize_urb(unsigned align_mul, unsigned align_offset,
 {
    brw_pass_tracker *pt = data;
 
-   /* Jay does not yet SIMD split SENDs, so we cannot SIMD split illegal 
-    * SIMD32x8 SENDs in Jay, like BRW does. Instead we just limit URB
-    * vectorization to x4 here. 
-    */
-   if (
-      intel_use_jay(pt->compiler->devinfo, pt->nir->info.stage) && 
-      pt->dispatch_width == 32 && num_components > 4) {
-      return false;
-   }
-
    if (bit_size != 32 || num_components > 8)
+      return false;
+
+   /* vec8 sends are illegal in SIMD32, which may happen for mesh/task */
+   if (pt->nir->info.max_subgroup_size > 16 && num_components > 4)
       return false;
 
    if (num_components > 4 && num_components < 8 &&
@@ -2572,14 +2566,11 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
 
    OPT(nir_lower_flrp, lower_flrp, false /* always_precise */);
 
-   /* Needs more work to enable for Jay, see corresponding TODO there */
-   if (!jay) {
-      struct nir_opt_16bit_tex_image_options options = {
-         .rounding_mode = nir_rounding_mode_undef,
-         .opt_tex_dest_types = nir_type_float | nir_type_int | nir_type_uint,
-      };
-      OPT(nir_opt_16bit_tex_image, &options);
-   }
+   struct nir_opt_16bit_tex_image_options options = {
+      .rounding_mode = nir_rounding_mode_undef,
+      .opt_tex_dest_types = nir_type_float | nir_type_int | nir_type_uint,
+   };
+   OPT(nir_opt_16bit_tex_image, &options);
 
    /* Anv delays the initialization of softfp64, so we may not have
     * softfp64 set here. The full lowering will happen during the post-process

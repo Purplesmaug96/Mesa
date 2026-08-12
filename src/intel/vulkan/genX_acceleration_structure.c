@@ -424,18 +424,45 @@ anv_clear_out_bvh(struct anv_cmd_buffer *cmd_buffer,
    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 }
 
-static VkResult
-anv_encode_as(VkCommandBuffer commandBuffer, struct vk_device *vk_device, struct vk_meta_device *meta,
-              const struct vk_acceleration_structure_build_args *args, struct vk_acceleration_structure_build_state *states,
-              uint32_t build_count, uint32_t build_flags)
+struct bvh_desc {
+   uint32_t idx;
+   uint32_t leaf_node_count;
+};
+
+struct encode_batch {
+   uint32_t max_leaf_count;
+   uint32_t count;
+   uint64_t buffer_pa;
+   struct anv_batch_args *args;
+   struct bvh_desc *ordered;
+};
+
+static int
+bvh_reverse_size_compare(const void *first, const void *second)
 {
-   VK_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   const struct bvh_desc *first_desc = (struct bvh_desc *)first;
+   const struct bvh_desc *second_desc = (struct bvh_desc *)second;
+   if (first_desc->leaf_node_count > second_desc->leaf_node_count)
+      return -1;
+   else if (first_desc->leaf_node_count < second_desc->leaf_node_count)
+      return 1;
+   return 0;
+}
 
-   trace_intel_begin_as_encode(&cmd_buffer->trace);
+static struct encode_batch*
+anv_encode_init_batch(struct anv_cmd_buffer *cmd_buffer,
+                      struct vk_acceleration_structure_build_state *states,
+                      uint32_t build_count, uint32_t build_flags)
+{
+   struct encode_batch *batch = malloc(sizeof(struct encode_batch) +
+                                build_count * sizeof(struct anv_batch_args) +
+                                build_count * sizeof(struct bvh_desc));
+   batch->max_leaf_count = 0;
+   batch->count = 0;
+   batch->args = ((struct anv_batch_args *)(batch + 1));
+   batch->ordered = ((struct bvh_desc *)(batch->args + build_count));
 
-   anv_bvh_build_bind_pipeline(commandBuffer, ANV_OBJECT_KEY_BVH_ENCODE, encode_spv, sizeof(encode_spv),
-                               sizeof(struct encode_args), build_flags);
-
+   /* Sort order of batch execution based on descending node count */
    for (uint32_t i = 0; i < build_count; i++) {
       struct vk_acceleration_structure_build_state *state = &states[i];
       if (state->config.internal_type == VK_INTERNAL_BUILD_TYPE_UPDATE)
@@ -443,22 +470,42 @@ anv_encode_as(VkCommandBuffer commandBuffer, struct vk_device *vk_device, struct
       if ((state->config.build_flags & ANV_ENCODE_BUILD_FLAGS) != build_flags)
          continue;
 
-      VK_FROM_HANDLE(vk_acceleration_structure, dst, state->build_info->dstAccelerationStructure);
-
-      struct bvh_layout bvh_layout;
-      VkGeometryTypeKHR geometry_type = vk_get_as_geometry_type(state->build_info);
-      get_bvh_layout(state, &bvh_layout);
-
       if (INTEL_DEBUG(DEBUG_BVH_NO_BUILD)) {
          /* Zero out the whole BVH when we run with BVH_NO_BUILD debug option. */
+         VK_FROM_HANDLE(vk_acceleration_structure, dst, state->build_info->dstAccelerationStructure);
+
+         struct bvh_layout bvh_layout;
+         get_bvh_layout(state, &bvh_layout);
+
          anv_clear_out_bvh(cmd_buffer,
                            vk_acceleration_structure_get_va(dst) + bvh_layout.bvh_offset,
                            bvh_layout.size);
          continue;
       }
 
-      uint64_t intermediate_header_addr = state->build_info->scratchData.deviceAddress + state->scratch.header_offset;
-      uint64_t intermediate_bvh_addr = state->build_info->scratchData.deviceAddress + state->scratch.ir_offset;
+      batch->ordered[batch->count].idx = i;
+      batch->ordered[batch->count].leaf_node_count = state->leaf_node_count;
+      batch->count++;
+   }
+   qsort(batch->ordered, batch->count, sizeof(struct bvh_desc), bvh_reverse_size_compare);
+
+   if (batch->count == 0)
+      return batch;
+
+   for (uint32_t i = 0; i < batch->count; i++) {
+      uint32_t idx = batch->ordered[i].idx;
+      struct vk_acceleration_structure_build_state *state = &states[idx];
+
+      VK_FROM_HANDLE(vk_acceleration_structure, dst, state->build_info->dstAccelerationStructure);
+
+      struct bvh_layout bvh_layout;
+      VkGeometryTypeKHR geometry_type = vk_get_as_geometry_type(state->build_info);
+      get_bvh_layout(state, &bvh_layout);
+
+      uint64_t intermediate_header_addr =
+         state->build_info->scratchData.deviceAddress + state->scratch.header_offset;
+      uint64_t intermediate_bvh_addr =
+         state->build_info->scratchData.deviceAddress + state->scratch.ir_offset;
 
       STATIC_ASSERT(sizeof(struct anv_accel_struct_header) == ANV_RT_BVH_HEADER_SIZE);
       STATIC_ASSERT(sizeof(struct anv_instance_leaf) == ANV_RT_INSTANCE_LEAF_SIZE);
@@ -466,33 +513,120 @@ anv_encode_as(VkCommandBuffer commandBuffer, struct vk_device *vk_device, struct
       STATIC_ASSERT(sizeof(struct anv_procedural_leaf_node) == ANV_RT_PROCEDURAL_LEAF_SIZE);
       STATIC_ASSERT(sizeof(struct anv_internal_node) == ANV_RT_INTERNAL_NODE_SIZE);
 
+      batch->args[i].intermediate_bvh = intermediate_bvh_addr;
+      batch->args[i].output_bvh = vk_acceleration_structure_get_va(dst) +
+                                  bvh_layout.bvh_offset;
+      batch->args[i].header = intermediate_header_addr;
+      batch->args[i].leaf_node_count = state->leaf_node_count;
+      batch->args[i].geometry_type = geometry_type;
+      batch->args[i].instance_leaves_addr = vk_acceleration_structure_get_va(dst) +
+                                            bvh_layout.instance_leaves_offset;
+      batch->args[i].parent_child_map = bvh_layout.parent_child_map_offset != 0 ?
+                                        (vk_acceleration_structure_get_va(dst) +
+                                         bvh_layout.parent_child_map_offset) : 0;
+      batch->args[i].leaf_block_offset_map = bvh_layout.leaf_block_map_offset != 0 ?
+                                             (vk_acceleration_structure_get_va(dst) +
+                                              bvh_layout.leaf_block_map_offset) : 0;
+      batch->args[i].parent_child_count_map = bvh_layout.parent_child_count_map_offset != 0 ?
+                                              (vk_acceleration_structure_get_va(dst) +
+                                               bvh_layout.parent_child_count_map_offset) : 0,
+      batch->max_leaf_count = MAX2(batch->max_leaf_count, state->leaf_node_count);
+   }
+
+   struct anv_device *device = cmd_buffer->device;
+   struct anv_bo *bo = NULL;
+
+   uint64_t arg_size = batch->count * sizeof(struct anv_batch_args);
+   VkResult result = anv_device_alloc_bo(device, "anv_batch_args", arg_size,
+                                         ANV_BO_ALLOC_MAPPED |
+                                         ANV_BO_ALLOC_HOST_CACHED_COHERENT, 0,
+                                         &bo);
+   if (result != VK_SUCCESS)
+      return batch;
+
+   struct anv_address dst_addr = { .bo = bo, .offset = 0 };
+   anv_cmd_buffer_update_addr(cmd_buffer, dst_addr, arg_size, batch->args);
+   batch->buffer_pa = anv_address_physical(dst_addr);
+
+   return batch;
+}
+
+static void
+anv_encode_as_batch(VkCommandBuffer commandBuffer,
+                    struct vk_acceleration_structure_build_state *states,
+                    uint32_t build_count, uint32_t build_flags, struct encode_batch *batch,
+                    uint32_t nodes, uint32_t node_offset)
+{
+   VK_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+
+   uint i = 0;
+   for (; i < batch->count &&
+          align(batch->ordered[i].leaf_node_count, 32) >= node_offset + nodes; i++);
+
+   if (i > 0) {
       const struct encode_args args = {
-         .intermediate_bvh = intermediate_bvh_addr,
-         .output_bvh = vk_acceleration_structure_get_va(dst) +
-                       bvh_layout.bvh_offset,
-         .header = intermediate_header_addr,
-         .leaf_node_count = state->leaf_node_count,
-         .geometry_type = geometry_type,
-         .instance_leaves_addr = vk_acceleration_structure_get_va(dst) +
-                                 bvh_layout.instance_leaves_offset,
-         .parent_child_map = bvh_layout.parent_child_map_offset != 0 ?
-                             (vk_acceleration_structure_get_va(dst) +
-                              bvh_layout.parent_child_map_offset) : 0,
-         .leaf_block_offset_map = bvh_layout.leaf_block_map_offset != 0 ?
-                                  (vk_acceleration_structure_get_va(dst) +
-                                   bvh_layout.leaf_block_map_offset) : 0,
-         .parent_child_count_map = bvh_layout.parent_child_count_map_offset != 0 ?
-                                   (vk_acceleration_structure_get_va(dst) +
-                                    bvh_layout.parent_child_count_map_offset) : 0,
+         .batch_args = batch->buffer_pa,
+         .batch_offset = 0,
+         .start_node_offset = node_offset,
       };
       anv_bvh_build_set_args(commandBuffer, &args, sizeof(args));
 
       anv_genX(cmd_buffer->device->info, cmd_dispatch_unaligned)
-         (commandBuffer, MAX2(state->leaf_node_count, 1), 1, 1);
+         (commandBuffer, MIN2(nodes, align(batch->max_leaf_count, 32)), i, 1);
+   }
+
+   for (; i < batch->count && align(batch->ordered[i].leaf_node_count, 32) > node_offset; i++) {
+      const struct encode_args args = {
+         .batch_args = batch->buffer_pa,
+         .batch_offset = i,
+         .start_node_offset = node_offset,
+      };
+      anv_bvh_build_set_args(commandBuffer, &args, sizeof(args));
+      anv_genX(cmd_buffer->device->info, cmd_dispatch_unaligned)
+         (commandBuffer, align(batch->ordered[i].leaf_node_count - node_offset, 32), 1, 1);
+   }
+}
+
+static VkResult
+anv_encode_as(VkCommandBuffer commandBuffer, struct vk_device *vk_device, struct vk_meta_device *meta,
+              const struct vk_acceleration_structure_build_args *args, struct vk_acceleration_structure_build_state *states,
+              uint32_t build_count, uint32_t build_flags)
+{
+   VK_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   trace_intel_begin_as_encode(&cmd_buffer->trace);
+
+   /* TODO: Current encode.comp spilling a lot. Once we flip the swtich to Jay,
+    * let's set the subgroup size to 32 on Xe2+.
+    */
+   struct anv_device *device = cmd_buffer->device;
+   device->accel_struct_build.build_args.subgroup_size =
+      device->info->ver >= 20 ? 16 : 8;
+
+   struct encode_batch *batch = anv_encode_init_batch(cmd_buffer, states, build_count, build_flags);
+   if (batch->count == 0)
+      return VK_SUCCESS;
+   if (batch->buffer_pa == 0) {
+      return vk_errorf(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY,
+                       "Failed to allocate batch buffer for AS encode");
+   }
+   vk_barrier_compute_w_to_compute_r(vk_command_buffer_to_handle(&cmd_buffer->vk));
+
+   anv_bvh_build_bind_pipeline(commandBuffer, ANV_OBJECT_KEY_BVH_ENCODE, encode_spv,
+                               sizeof(encode_spv), sizeof(struct encode_args), build_flags);
+
+   /* Encode root nodes first, then direct children of roots, followed by
+    * remaining nodes. Ordering thread execution from root -> leaf across all
+    * batches in parallel improves performance. Final dispatch is not batched
+    * to avoid thread wastage for shorter trees.
+    */
+   for (uint nodes = 32, node_offset = 0; node_offset < batch->max_leaf_count; nodes *= 4) {
+      anv_encode_as_batch(commandBuffer, states, build_count, build_flags,
+                          batch, nodes, node_offset);
+      node_offset += nodes;
    }
 
    trace_intel_end_as_encode(&cmd_buffer->trace, build_flags);
-
+   free(batch);
    return VK_SUCCESS;
 }
 
@@ -847,7 +981,7 @@ anv_device_init_accel_struct_build_state(struct anv_device *device)
       (struct vk_acceleration_structure_build_args) {
          .emit_markers = u_trace_enabled(&device->ds.trace_context),
          .has_update = true,
-         .subgroup_size = device->info->ver >= 20 ? 16 : 8,
+         .subgroup_size = device->info->ver >= 20 ? 32 : 16,
          .radix_sort_64 = device->accel_struct_build.radix_sort_64,
          .radix_sort_96 = device->accel_struct_build.radix_sort_96,
          /* See struct anv_accel_struct_header from anv_bvh_defines.h

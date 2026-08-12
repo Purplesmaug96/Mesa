@@ -168,6 +168,7 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float_controls = true,
+      .KHR_shader_fma = true,
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_non_semantic_info = true,
       .KHR_shader_relaxed_extended_instruction = true,
@@ -204,6 +205,7 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_host_query_reset = true,
       .EXT_image_2d_view_of_3d = true,
       .EXT_index_type_uint8 = true,
+      .EXT_inline_uniform_block = true,
       .EXT_line_rasterization = true,
       .EXT_map_memory_placed = true,
       .EXT_non_seamless_cube_map = true,
@@ -366,6 +368,11 @@ static void pvr_physical_device_get_supported_features(
       /* Vulkan 1.1 / VK_KHR_shader_draw_parameters */
       .shaderDrawParameters = true,
 
+      /* VK_KHR_shader_fma */
+      .shaderFmaFloat16 = false,
+      .shaderFmaFloat32 = true,
+      .shaderFmaFloat64 = false,
+
       /* Vulkan 1.3 / VK_KHR_shader_integer_dot_product */
       .shaderIntegerDotProduct = true,
 
@@ -445,6 +452,10 @@ static void pvr_physical_device_get_supported_features(
 
       /* Vulkan 1.2 / VK_EXT_host_query_reset */
       .hostQueryReset = true,
+
+      /* Vulkan 1.3 / VK_EXT_inline_uniform_block */
+      .inlineUniformBlock = true,
+      .descriptorBindingInlineUniformBlockUpdateAfterBind = true,
 
       /* VK_EXT_image_2d_view_of_3d */
       .image2DViewOf3D = true,
@@ -850,6 +861,13 @@ static bool pvr_physical_device_get_properties(
 
       /* VK_EXT_extended_dynamic_state3 */
       .dynamicPrimitiveTopologyUnrestricted = false,
+
+      /* Vulkan 1.3 / VK_EXT_inline_uniform_block */
+      .maxInlineUniformBlockSize = 256U,
+      .maxPerStageDescriptorInlineUniformBlocks = 4U,
+      .maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 4U,
+      .maxDescriptorSetInlineUniformBlocks = 4U,
+      .maxDescriptorSetUpdateAfterBindInlineUniformBlocks = 4U,
 
       /* VK_EXT_map_memory_placed */
       .minPlacedMemoryMapAlignment = pdevice->ws->page_size,

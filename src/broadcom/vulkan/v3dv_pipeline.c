@@ -2964,6 +2964,27 @@ pipeline_init_dynamic_state(struct v3dv_device *device,
    return result;
 }
 
+static bool
+pipeline_has_integer_vertex_attrib(struct v3dv_pipeline *pipeline)
+{
+   for (uint8_t i = 0; i < pipeline->va_count; i++) {
+      if (vk_format_is_int(pipeline->va[i].vk_format))
+         return true;
+   }
+   return false;
+}
+
+/* On the hardware that needs the default attribute values we can still skip
+ * the per-pipeline BO when no attribute is fed by them, which is the case
+ * unless the pipeline has an integer vertex attribute.
+ */
+static bool
+pipeline_needs_default_attribute_values(struct v3dv_pipeline *pipeline)
+{
+   return v3d_device_needs_default_attribute_values(&pipeline->device->devinfo) &&
+          pipeline_has_integer_vertex_attrib(pipeline);
+}
+
 static VkResult
 pipeline_init(struct v3dv_pipeline *pipeline,
               struct v3dv_device *device,
@@ -3042,7 +3063,7 @@ pipeline_init(struct v3dv_pipeline *pipeline,
 
    v3d_X((&device->devinfo), pipeline_pack_compile_state)(pipeline, vi_info, vd_info);
 
-   if (v3d_X((&device->devinfo), pipeline_needs_default_attribute_values)(pipeline)) {
+   if (pipeline_needs_default_attribute_values(pipeline)) {
       pipeline->default_attribute_values =
          v3d_X((&pipeline->device->devinfo), create_default_attribute_values)(pipeline->device, pipeline);
 
@@ -3505,19 +3526,22 @@ append(char **str, size_t *offset, const char *fmt, ...)
    va_end(args);
 }
 
-static void
+static VkResult
 pipeline_collect_executable_data(struct v3dv_pipeline *pipeline)
 {
    if (pipeline->executables.mem_ctx)
-      return;
+      return VK_SUCCESS;
 
    pipeline->executables.mem_ctx = ralloc_context(NULL);
+   if (!pipeline->executables.mem_ctx)
+      return vk_error(pipeline->device, VK_ERROR_OUT_OF_HOST_MEMORY);
+
    util_dynarray_init(&pipeline->executables.data,
                       pipeline->executables.mem_ctx);
 
    /* Don't crash for failed/bogus pipelines */
    if (!pipeline->shared_data)
-      return;
+      return VK_SUCCESS;
 
    for (int s = BROADCOM_SHADER_VERTEX; s <= BROADCOM_SHADER_COMPUTE; s++) {
       VkShaderStageFlags vk_stage =
@@ -3555,6 +3579,8 @@ pipeline_collect_executable_data(struct v3dv_pipeline *pipeline)
       };
       util_dynarray_append(&pipeline->executables.data, data);
    }
+
+   return VK_SUCCESS;
 }
 
 static const struct v3dv_pipeline_executable_data *
@@ -3576,7 +3602,9 @@ v3dv_GetPipelineExecutableInternalRepresentationsKHR(
 {
    V3DV_FROM_HANDLE(v3dv_pipeline, pipeline, pExecutableInfo->pipeline);
 
-   pipeline_collect_executable_data(pipeline);
+   VkResult result = pipeline_collect_executable_data(pipeline);
+   if (result != VK_SUCCESS)
+      return result;
 
    VK_OUTARRAY_MAKE_TYPED(VkPipelineExecutableInternalRepresentationKHR, out,
                           pInternalRepresentations, pInternalRepresentationCount);
@@ -3617,7 +3645,9 @@ v3dv_GetPipelineExecutablePropertiesKHR(
 {
    V3DV_FROM_HANDLE(v3dv_pipeline, pipeline, pPipelineInfo->pipeline);
 
-   pipeline_collect_executable_data(pipeline);
+   VkResult result = pipeline_collect_executable_data(pipeline);
+   if (result != VK_SUCCESS)
+      return result;
 
    VK_OUTARRAY_MAKE_TYPED(VkPipelineExecutablePropertiesKHR, out,
                           pProperties, pExecutableCount);
@@ -3652,7 +3682,9 @@ v3dv_GetPipelineExecutableStatisticsKHR(
 {
    V3DV_FROM_HANDLE(v3dv_pipeline, pipeline, pExecutableInfo->pipeline);
 
-   pipeline_collect_executable_data(pipeline);
+   VkResult result = pipeline_collect_executable_data(pipeline);
+   if (result != VK_SUCCESS)
+      return result;
 
    const struct v3dv_pipeline_executable_data *exe =
       pipeline_get_executable(pipeline, pExecutableInfo->executableIndex);

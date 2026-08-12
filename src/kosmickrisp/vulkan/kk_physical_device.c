@@ -176,6 +176,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .EXT_custom_resolve = true,
       .EXT_debug_marker = true,
       .EXT_depth_clip_control = true,
+      .EXT_depth_clip_enable = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_metal = true,
       .EXT_external_memory_host = true,
@@ -210,6 +211,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_external_semaphore_fd = true,
 
       .AMD_shader_image_load_store_lod = true,
+      .AMD_buffer_marker = true,
    };
 }
 
@@ -452,8 +454,12 @@ kk_get_device_features(
       /* VK_EXT_depth_clip_control */
       .depthClipControl = true,
 
+      /* VK_EXT_depth_clip_enable */
+      .depthClipEnable = true,
+
       /* VK_EXT_extended_dynamic_state3 */
       .extendedDynamicState3DepthClampEnable = true,
+      .extendedDynamicState3DepthClipEnable = true,
       .extendedDynamicState3DepthClipNegativeOneToOne = true,
       .extendedDynamicState3LineRasterizationMode = true,
       .extendedDynamicState3ProvokingVertexMode = true,
@@ -976,61 +982,11 @@ kk_physical_device_free_disk_cache(struct kk_physical_device *pdev)
 }
 
 static uint64_t
-kk_get_sysmem_heap_size(void)
+kk_get_sysmem_heap_size(struct kk_physical_device *pdev)
 {
-   /* Report the total amount of system memory as the actual heap size */
-   uint64_t sysmem_size_B = 0;
-   if (!os_get_total_physical_memory(&sysmem_size_B))
-      return 0;
-
-   return sysmem_size_B;
-}
-
-static uint64_t
-kk_get_sysmem_heap_budget(struct kk_physical_device *pdev)
-{
-   /* From the Vulkan 1.3.278 spec:
-    *
-    *    "heapBudget is an array of VK_MAX_MEMORY_HEAPS VkDeviceSize
-    *    values in which memory budgets are returned, with one
-    *    element for each memory heap. A heap’s budget is a rough
-    *    estimate of how much memory the process can allocate from
-    *    that heap before allocations may fail or cause performance
-    *    degradation. The budget includes any currently allocated
-    *    device memory."
-    *
-    * and
-    *
-    *    "The heapBudget value must be less than or equal to
-    *    VkMemoryHeap::size for each heap."
-    *
-    * From Metal documentation for recommendedMaxWorkingSetSize:
-    *
-    *     An approximation of how much memory, in bytes, this GPU device can
-    *     allocate without affecting its runtime performance.
-    *
-    * From Metal documentation for currentAllocatedSize:
-    *
-    *     The total amount of memory, in bytes, the GPU device is using for all
-    *     of its resources.
-    *
-    * First, determine the total and available system memory to calculate the
-    * amount of used memory. Then, subtract this from the Metal-defined budget,
-    * and add back the current used memory by this device.
-    */
-   uint64_t sysmem_size_B = 0;
-   uint64_t sysmem_available_B = 0;
-   if (!os_get_total_physical_memory(&sysmem_size_B) ||
-       !os_get_available_system_memory(&sysmem_available_B))
-      return 0;
-
-   uint64_t sysmem_used_B = sysmem_size_B - sysmem_available_B;
-   uint64_t sysmem_budget_B =
-      mtl_device_recommended_max_working_set_size(pdev->mtl_dev_handle);
-   uint64_t remaining_budget_B =
-      sysmem_budget_B > sysmem_used_B ? sysmem_budget_B - sysmem_used_B : 0u;
-   return remaining_budget_B +
-          mtl_device_current_allocated_size(pdev->mtl_dev_handle);
+   /* Report the recommended Metal working set size as the GPU heap size. This
+    * is a fixed percent of the total available system memory. */
+   return mtl_device_recommended_max_working_set_size(pdev->mtl_dev_handle);
 }
 
 static uint64_t
@@ -1052,6 +1008,19 @@ kk_get_sysmem_heap_used(struct kk_physical_device *pdev)
     * allocated size
     */
    return mtl_device_current_allocated_size(pdev->mtl_dev_handle);
+}
+
+static uint64_t
+kk_get_sysmem_heap_budget(struct kk_physical_device *pdev)
+{
+   uint64_t heap_size = kk_get_sysmem_heap_size(pdev);
+   uint64_t used = kk_get_sysmem_heap_used(pdev);
+
+   /* Budget is calculated using the default Mesa logic, based on available
+    * system memory. Available memory is reduced to 90% to avoid thrashing. */
+   const float available_percent = 0.9f;
+   return vk_physical_device_heap_budget_from_system(
+      &pdev->vk, available_percent, heap_size, used);
 }
 
 static void
@@ -1115,12 +1084,19 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
 
    /* Workarounds resolved on macOS 27 */
    if (ns_is_os_version_at_least(27, 0, 0)) {
+      /* 1-6 */
       settings->disabled_workarounds |= BITFIELD64_MASK(7);
+
+      settings->disabled_workarounds |= BITFIELD64_BIT(8);
+      settings->disabled_workarounds |= BITFIELD64_BIT(11);
       settings->disabled_workarounds |= BITFIELD64_BIT(12);
+      settings->disabled_workarounds |= BITFIELD64_BIT(17);
    }
    /* M5-only workarounds */
    if (pdev->info.gpu_apple_family < 10) {
       settings->disabled_workarounds |= BITFIELD64_BIT(16);
+   } else {
+      settings->disabled_workarounds &= ~BITFIELD64_BIT(2);
    }
 }
 
@@ -1171,7 +1147,7 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
 
    kk_physical_device_init_pipeline_cache(pdev);
 
-   uint64_t sysmem_size_B = kk_get_sysmem_heap_size();
+   uint64_t sysmem_size_B = kk_get_sysmem_heap_size(pdev);
    if (sysmem_size_B == 0) {
       result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
                          "Failed to query total system memory");

@@ -1416,11 +1416,23 @@ pub fn gen_encoder(
         .add_meta_enum(
             "src_swizzle",
             SRC_SWIZZLE_ENUMS.iter().cloned(),
-            ["h01", "b0123"],
+            [
+                (("swiz_m", "h01"), "none"),
+                (("swiz_int_m", "h01"), "none"),
+                (("lanes_int_m", "b0123"), "none"),
+            ],
         )
         .expect("Failed to create src_swizzle meta-enum");
     isa.enums
-        .add_meta_enum("dst_lanes", DST_LANES_ENUMS.iter().cloned(), [])
+        .add_meta_enum(
+            "dst_lanes",
+            DST_LANES_ENUMS.iter().cloned(),
+            [
+                (("dest_width_narrow_m", "h01"), "hf01"),
+                (("dest_width_narrow_m", "h0"), "hf0"),
+                (("dest_width_narrow_m", "h1"), "hf1"),
+            ],
+        )
         .expect("Failed to create dst_lanes meta-enum");
     isa.enums
         .add_meta_enum(

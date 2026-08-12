@@ -104,8 +104,7 @@ cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer,
 
    genX(cmd_buffer_update_color_aux_op)(cmd_buffer, ANV_COLOR_AUX_OP_CLASS_NONE);
 
-   genX(flush_descriptor_buffers)(cmd_buffer, bind_state,
-                                  VK_SHADER_STAGE_COMPUTE_BIT);
+   genX(flush_binding_mode)(cmd_buffer, bind_state, VK_SHADER_STAGE_COMPUTE_BIT);
 
    const bool uses_systolic = get_cs_prog_data(comp_state)->uses_systolic;
    genX(flush_pipeline_select_gpgpu)(cmd_buffer, uses_systolic);
@@ -230,21 +229,21 @@ cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer,
 #endif
 
    if (indirect_set == NULL &&
-       (cmd_buffer->state.push_constants_dirty & VK_SHADER_STAGE_COMPUTE_BIT)) {
-      if (bind_state->push_constants_state.alloc_size == 0) {
-         bind_state->push_constants_state =
-            anv_cmd_buffer_cs_push_constants(cmd_buffer);
-      }
+       bind_state->push_constants_state.alloc_size == 0) {
+      bind_state->push_constants_state =
+         anv_cmd_buffer_cs_push_constants(cmd_buffer);
+      cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
+   }
 
+   if (cmd_buffer->state.push_constants_dirty & VK_SHADER_STAGE_COMPUTE_BIT) {
 #if GFX_VERx10 < 125
-      if (bind_state->push_constants_state.alloc_size) {
+      if (bind_state->push_constants_state.alloc_size > 0) {
          anv_batch_emit(&cmd_buffer->batch, GENX(MEDIA_CURBE_LOAD), curbe) {
             curbe.CURBETotalDataLength    = bind_state->push_constants_state.alloc_size;
             curbe.CURBEDataStartAddress   = bind_state->push_constants_state.offset;
          }
       }
 #endif
-
       cmd_buffer->state.push_constants_dirty &= ~VK_SHADER_STAGE_COMPUTE_BIT;
    }
 
@@ -287,28 +286,28 @@ anv_cmd_buffer_push_driver_values(struct anv_cmd_buffer *cmd_buffer,
    struct anv_push_constants *push = &bind_state->push_constants;
    bool updated = false;
    if (bind_map->binding_mask & ANV_PIPELINE_BIND_MASK_BASE_WORKGROUP) {
-      UPDATE_PUSH(push->cs.base_workgroup[0], baseGroupX);
-      UPDATE_PUSH(push->cs.base_workgroup[1], baseGroupY);
-      UPDATE_PUSH(push->cs.base_workgroup[2], baseGroupZ);
+      UPDATE_PUSH(push->drv_data.cs.base_workgroup[0], baseGroupX);
+      UPDATE_PUSH(push->drv_data.cs.base_workgroup[1], baseGroupY);
+      UPDATE_PUSH(push->drv_data.cs.base_workgroup[2], baseGroupZ);
    }
 
    if (bind_map->binding_mask & ANV_PIPELINE_BIND_MASK_NUM_WORKGROUP) {
       if (anv_address_is_null(indirect_group)) {
-         UPDATE_PUSH(push->cs.num_workgroups[0], groupCountX);
-         UPDATE_PUSH(push->cs.num_workgroups[1], groupCountY);
-         UPDATE_PUSH(push->cs.num_workgroups[2], groupCountZ);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[0], groupCountX);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[1], groupCountY);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[2], groupCountZ);
       } else {
          uint64_t addr64 = anv_address_physical(indirect_group);
          uint32_t lower_addr32 = addr64 & 0xffffffff;
          uint32_t upper_addr32 = addr64 >> 32;
-         UPDATE_PUSH(push->cs.num_workgroups[0], UINT32_MAX);
-         UPDATE_PUSH(push->cs.num_workgroups[1], lower_addr32);
-         UPDATE_PUSH(push->cs.num_workgroups[2], upper_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[0], UINT32_MAX);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[1], lower_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[2], upper_addr32);
       }
    }
 
    if (bind_map->binding_mask & ANV_PIPELINE_BIND_MASK_UNALIGNED_INV_X)
-      UPDATE_PUSH(push->cs.unaligned_invocations_x, unaligned_x_offset);
+      UPDATE_PUSH(push->drv_data.cs.unaligned_invocations_x, unaligned_x_offset);
 
    if (updated) {
       cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
@@ -518,16 +517,16 @@ fill_inline_param(uint8_t param_value,
                   const struct compute_walker_inline_params_val *values)
 {
    switch (param_value) {
-   case ANV_INLINE_DWORD_PUSH_ADDRESS_LDW:               return values->push_addr64 & 0xffffffff;
-   case ANV_INLINE_DWORD_PUSH_ADDRESS_UDW:               return values->push_addr64 >> 32;
-   case anv_drv_const_dword(cs.num_workgroups[0]):       return values->num_wg[0];
-   case anv_drv_const_dword(cs.num_workgroups[1]):       return values->num_wg[1];
-   case anv_drv_const_dword(cs.num_workgroups[2]):       return values->num_wg[2];
-   case anv_drv_const_dword(cs.base_workgroup[0]):       return values->base_wg[0];
-   case anv_drv_const_dword(cs.base_workgroup[1]):       return values->base_wg[1];
-   case anv_drv_const_dword(cs.base_workgroup[2]):       return values->base_wg[2];
-   case anv_drv_const_dword(cs.unaligned_invocations_x): return values->unaligned_x_offset;
-   default:                                              return values->push_data[param_value];
+   case ANV_INLINE_DWORD_PUSH_ADDRESS_LDW:                        return values->push_addr64 & 0xffffffff;
+   case ANV_INLINE_DWORD_PUSH_ADDRESS_UDW:                        return values->push_addr64 >> 32;
+   case anv_drv_const_dword(drv_data.cs.num_workgroups[0]):       return values->num_wg[0];
+   case anv_drv_const_dword(drv_data.cs.num_workgroups[1]):       return values->num_wg[1];
+   case anv_drv_const_dword(drv_data.cs.num_workgroups[2]):       return values->num_wg[2];
+   case anv_drv_const_dword(drv_data.cs.base_workgroup[0]):       return values->base_wg[0];
+   case anv_drv_const_dword(drv_data.cs.base_workgroup[1]):       return values->base_wg[1];
+   case anv_drv_const_dword(drv_data.cs.base_workgroup[2]):       return values->base_wg[2];
+   case anv_drv_const_dword(drv_data.cs.unaligned_invocations_x): return values->unaligned_x_offset;
+   default:                                                       return values->push_data[param_value];
    }
 }
 
@@ -848,8 +847,8 @@ genX(cmd_dispatch_unaligned)(
 
    /* RT shaders have Y and Z local size set to 1 always. */
    assert(prog_data->local_size[1] == 1 && prog_data->local_size[2] == 1);
-   /* RT shaders dispatched with group Y and Z set to 1 always. */
-   assert(groupCountY == 1 && groupCountZ == 1);
+   /* RT shaders dispatched with group Z set to 1 always. */
+   assert(groupCountZ == 1);
 
    anv_measure_snapshot(cmd_buffer,
                         INTEL_SNAPSHOT_COMPUTE,
@@ -1315,7 +1314,7 @@ cmd_buffer_flush_rt_state(struct anv_cmd_buffer *cmd_buffer,
 
    genX(cmd_buffer_update_color_aux_op)(cmd_buffer, ANV_COLOR_AUX_OP_CLASS_NONE);
 
-   genX(flush_descriptor_buffers)(cmd_buffer, bind_state, ANV_RT_STAGE_BITS);
+   genX(flush_binding_mode)(cmd_buffer, bind_state, ANV_RT_STAGE_BITS);
 
    genX(flush_pipeline_select_gpgpu)(cmd_buffer, false);
 
