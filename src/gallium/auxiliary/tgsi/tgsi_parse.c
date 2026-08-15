@@ -81,14 +81,23 @@ copy_token(void *dst, const void *src)
 
 
 /**
- * Get next 4-byte token, return it at address specified by 'token'
+ * Get next 4-byte token, return it at address specified by 'token'.
+ *
+ * The end-of-tokens check below used to be an assert() only, which is
+ * compiled out with NDEBUG.  A corrupt or truncated token stream (or one
+ * read past its declared BodySize) then made the parser read arbitrarily far
+ * past the end of the token array, treating heap garbage as TGSI tokens.
+ * Guard it at runtime and return a zeroed token instead.
  */
 static void
 next_token(
    struct tgsi_parse_context *ctx,
    void *token )
 {
-   assert( !tgsi_parse_end_of_tokens( ctx ) );
+   if (tgsi_parse_end_of_tokens( ctx )) {
+      memset(token, 0, 4);
+      return;
+   }
    copy_token(token, &ctx->Tokens[ctx->Position]);
    ctx->Position++;
 }
@@ -150,6 +159,15 @@ tgsi_parse_token(
 
       imm_count = imm->Immediate.NrTokens - 1;
 
+      /* imm->u[] holds at most 4 values.  A malformed/truncated stream
+       * (or a stream whose Position has run past its declared BodySize)
+       * can declare a much larger NrTokens here; without this clamp the
+       * copy loops below wrote past the end of the struct, corrupting the
+       * caller's stack frame (crashed gl_cube by clobbering a saved LR).
+       */
+      if (imm_count > ARRAY_SIZE(imm->u))
+         imm_count = ARRAY_SIZE(imm->u);
+
       switch (imm->Immediate.DataType) {
       case TGSI_IMM_FLOAT32:
       case TGSI_IMM_FLOAT64:
@@ -192,7 +210,7 @@ tgsi_parse_token(
 
       if (inst->Instruction.Texture) {
          next_token( ctx, &inst->Texture);
-         for (i = 0; i < inst->Texture.NumOffsets; i++) {
+         for (i = 0; i < inst->Texture.NumOffsets && i < ARRAY_SIZE(inst->TexOffsets); i++) {
             next_token( ctx, &inst->TexOffsets[i] );
          }
       }
@@ -201,7 +219,8 @@ tgsi_parse_token(
          next_token(ctx, &inst->Memory);
       }
 
-      assert( inst->Instruction.NumDstRegs <= TGSI_FULL_MAX_DST_REGISTERS );
+      if (inst->Instruction.NumDstRegs > TGSI_FULL_MAX_DST_REGISTERS)
+         inst->Instruction.NumDstRegs = TGSI_FULL_MAX_DST_REGISTERS;
 
       for (i = 0; i < inst->Instruction.NumDstRegs; i++) {
 
@@ -223,7 +242,8 @@ tgsi_parse_token(
          }
       }
 
-      assert( inst->Instruction.NumSrcRegs <= TGSI_FULL_MAX_SRC_REGISTERS );
+      if (inst->Instruction.NumSrcRegs > TGSI_FULL_MAX_SRC_REGISTERS)
+         inst->Instruction.NumSrcRegs = TGSI_FULL_MAX_SRC_REGISTERS;
 
       for (i = 0; i < inst->Instruction.NumSrcRegs; i++) {
 
@@ -257,6 +277,8 @@ tgsi_parse_token(
       copy_token(&prop->Property, &token);
 
       prop_count = prop->Property.NrTokens - 1;
+      if (prop_count > ARRAY_SIZE(prop->u))
+         prop_count = ARRAY_SIZE(prop->u);
       for (i = 0; i < prop_count; i++) {
          next_token(ctx, &prop->u[i]);
       }

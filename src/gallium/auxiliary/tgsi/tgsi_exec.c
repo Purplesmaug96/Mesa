@@ -1628,6 +1628,7 @@ store_dest_dstret(struct tgsi_exec_machine *mach,
    union tgsi_exec_channel *dst;
    int offset = 0;  /* indirection offset */
    int index;
+   const unsigned dstword = *(const unsigned *)&reg->Register;
 
 
    /* There is an extra source register that indirectly subscripts
@@ -1672,7 +1673,7 @@ store_dest_dstret(struct tgsi_exec_machine *mach,
       break;
 
    case TGSI_FILE_OUTPUT:
-      index = mach->OutputVertexOffset + reg->Register.Index;
+      index = mach->OutputVertexOffset + ((dstword >> 24) & 0xf);
       dst = &mach->Outputs[offset + index].xyzw[chan_index];
 #if 0
       debug_printf("NumOutputs = %d, TEMP_O_C/I = %d, redindex = %d\n",
@@ -1689,13 +1690,13 @@ store_dest_dstret(struct tgsi_exec_machine *mach,
       break;
 
    case TGSI_FILE_TEMPORARY:
-      index = reg->Register.Index;
+      index = (dstword >> 24) & 0xf;
       assert( index < TGSI_EXEC_NUM_TEMPS );
       dst = &mach->Temps[offset + index].xyzw[chan_index];
       break;
 
    case TGSI_FILE_ADDRESS:
-      index = reg->Register.Index;
+      index = (dstword >> 24) & 0xf;
       assert(index >= 0 && index < ARRAY_SIZE(mach->Addrs));
       dst = &mach->Addrs[index].xyzw[chan_index];
       break;
