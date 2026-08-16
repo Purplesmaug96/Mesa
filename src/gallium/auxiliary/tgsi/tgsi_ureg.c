@@ -1116,11 +1116,14 @@ void
 ureg_emit_src( struct ureg_program *ureg,
                struct ureg_src src )
 {
+   const unsigned *w = (const unsigned *)&src;
    unsigned size = 1 + (src.Indirect ? 1 : 0) +
-                   (src.Dimension ? (src.DimIndirect ? 2 : 1) : 0);
+                   (src.Dimension ? 1 : 0);
+   unsigned base = (src.Indirect ? 1 : 0);
+   unsigned di = (src.Dimension ? (base + 1) : base);
 
    union tgsi_any_token *out = get_tokens( ureg, DOMAIN_INSN, size );
-   unsigned n = 0;
+   volatile union tgsi_any_token *vo = out;
 
    assert(src.File != TGSI_FILE_NULL);
    assert(src.File < TGSI_FILE_COUNT);
@@ -1128,72 +1131,43 @@ ureg_emit_src( struct ureg_program *ureg,
    { /* EMIT-SRC TRACE (xbox360) */
       extern void DbgPrint(const char *fmt, ...);
       static unsigned es_cnt;
-      const unsigned *w = (const unsigned *)&src;
       if (es_cnt++ < 4000)
-         DbgPrint("ESRC st=%u sz=%u w0=%08X w1=%08X w2=%08X w3=%08X "
-                  "f=%u sw=(%u,%u,%u,%u) ind=%u dind=%u dim=%u "
-                  "abs=%u neg=%u indf=%u indsw=%u dindf=%u dindsw=%u "
-                  "idx=%d indidx=%d dimidx=%d dindidx=%d arr=%u",
-                 (unsigned)ureg->processor, (unsigned)sizeof(src),
-                 w[0], w[1], w[2], w[3],
-                 src.File, src.SwizzleX, src.SwizzleY, src.SwizzleZ,
-                 src.SwizzleW, src.Indirect, src.DimIndirect, src.Dimension,
-                 src.Absolute, src.Negate, src.IndirectFile,
-                 src.IndirectSwizzle, src.DimIndFile, src.DimIndSwizzle,
-                 src.Index, src.IndirectIndex, src.DimensionIndex,
-                 src.DimIndIndex, src.ArrayID);
+         DbgPrint("ESRCD f=%u i=%u d=%u w0=%08X w1=%08X w2=%08X w3=%08X",
+                 src.File, (unsigned)src.Indirect, (unsigned)src.Dimension,
+                 w[0], w[1], w[2], w[3]);
    }
 
-   out[n].value = 0;
-   out[n].src.File = src.File;
-   out[n].src.SwizzleX = src.SwizzleX;
-   out[n].src.SwizzleY = src.SwizzleY;
-   out[n].src.SwizzleZ = src.SwizzleZ;
-   out[n].src.SwizzleW = src.SwizzleW;
-   out[n].src.Index = src.Index;
-   out[n].src.Negate = src.Negate;
-   out[0].src.Absolute = src.Absolute;
-   n++;
+   vo[0].value = 0;
+   vo[0].src.File = src.File;
+   vo[0].src.SwizzleX = src.SwizzleX;
+   vo[0].src.SwizzleY = src.SwizzleY;
+   vo[0].src.SwizzleZ = src.SwizzleZ;
+   vo[0].src.SwizzleW = src.SwizzleW;
+   vo[0].src.Index = src.Index;
+   vo[0].src.Negate = src.Negate;
+   vo[0].src.Absolute = src.Absolute;
 
    if (src.Indirect) {
-      out[0].src.Indirect = 1;
-      out[n].value = 0;
-      out[n].ind.File = src.IndirectFile;
-      out[n].ind.Swizzle = src.IndirectSwizzle;
-      out[n].ind.Index = src.IndirectIndex;
-      if (!ureg->supports_any_inout_decl_range &&
-          (src.File == TGSI_FILE_INPUT || src.File == TGSI_FILE_OUTPUT))
-         out[n].ind.ArrayID = 0;
-      else
-         out[n].ind.ArrayID = src.ArrayID;
-      n++;
+      vo[0].src.Indirect = 1;
+      vo[base].value = ((unsigned)src.IndirectFile << 28) |
+                       ((unsigned)(src.IndirectSwizzle & 3) << 26) |
+                       ((unsigned)src.IndirectIndex & 0xFFFFu);
    }
 
    if (src.Dimension) {
-      out[0].src.Dimension = 1;
-      out[n].dim.Dimension = 0;
-      out[n].dim.Padding = 0;
-      if (src.DimIndirect) {
-         out[n].dim.Indirect = 1;
-         out[n].dim.Index = src.DimensionIndex;
-         n++;
-         out[n].value = 0;
-         out[n].ind.File = src.DimIndFile;
-         out[n].ind.Swizzle = src.DimIndSwizzle;
-         out[n].ind.Index = src.DimIndIndex;
-         if (!ureg->supports_any_inout_decl_range &&
-             (src.File == TGSI_FILE_INPUT || src.File == TGSI_FILE_OUTPUT))
-            out[n].ind.ArrayID = 0;
-         else
-            out[n].ind.ArrayID = src.ArrayID;
-      } else {
-         out[n].dim.Indirect = 0;
-         out[n].dim.Index = src.DimensionIndex;
-      }
-      n++;
+      vo[0].src.Dimension = 1;
+      vo[di].value = 0u;
    }
 
-   assert(n == size);
+   {
+      extern void DbgPrint(const char *fmt, ...);
+      static unsigned pst_cnt;
+      if (pst_cnt++ < 4000)
+         DbgPrint("ESRCW st=%u n=%u t0=%08X t1=%08X t2=%08X",
+                  (unsigned)ureg->processor, size,
+                  vo[0].value, size > 1 ? vo[1].value : 0,
+                  size > 2 ? vo[2].value : 0);
+   }
 }
 
 
@@ -1205,7 +1179,8 @@ ureg_emit_dst( struct ureg_program *ureg,
                    (dst.Dimension ? (dst.DimIndirect ? 2 : 1) : 0);
 
    union tgsi_any_token *out = get_tokens( ureg, DOMAIN_INSN, size );
-   unsigned n = 0;
+   unsigned base = (dst.Indirect ? 1 : 0);
+   unsigned di = (dst.Dimension ? (base + (dst.DimIndirect ? 1 : 0)) : base);
 
    assert(dst.File != TGSI_FILE_NULL);
    assert(dst.File != TGSI_FILE_SAMPLER);
@@ -1213,51 +1188,46 @@ ureg_emit_dst( struct ureg_program *ureg,
    assert(dst.File != TGSI_FILE_IMMEDIATE);
    assert(dst.File < TGSI_FILE_COUNT);
 
-   out[n].value = 0;
-   out[n].dst.File = dst.File;
-   out[n].dst.WriteMask = dst.WriteMask;
-   out[n].dst.Indirect = dst.Indirect;
-   out[n].dst.Index = dst.Index;
-   n++;
+   out[0].value = 0;
+   out[0].dst.File = dst.File;
+   out[0].dst.WriteMask = dst.WriteMask;
+   out[0].dst.Indirect = dst.Indirect;
+   out[0].dst.Index = dst.Index;
 
    if (dst.Indirect) {
-      out[n].value = 0;
-      out[n].ind.File = dst.IndirectFile;
-      out[n].ind.Swizzle = dst.IndirectSwizzle;
-      out[n].ind.Index = dst.IndirectIndex;
+      out[0].dst.Indirect = 1;
+      out[base].value = 0;
+      out[base].ind.File = dst.IndirectFile;
+      out[base].ind.Swizzle = dst.IndirectSwizzle;
+      out[base].ind.Index = dst.IndirectIndex;
       if (!ureg->supports_any_inout_decl_range &&
           (dst.File == TGSI_FILE_INPUT || dst.File == TGSI_FILE_OUTPUT))
-         out[n].ind.ArrayID = 0;
+         out[base].ind.ArrayID = 0;
       else
-         out[n].ind.ArrayID = dst.ArrayID;
-      n++;
+         out[base].ind.ArrayID = dst.ArrayID;
    }
 
    if (dst.Dimension) {
       out[0].dst.Dimension = 1;
-      out[n].dim.Dimension = 0;
-      out[n].dim.Padding = 0;
+      out[di].dim.Dimension = 0;
+      out[di].dim.Padding = 0;
       if (dst.DimIndirect) {
-         out[n].dim.Indirect = 1;
-         out[n].dim.Index = dst.DimensionIndex;
-         n++;
-         out[n].value = 0;
-         out[n].ind.File = dst.DimIndFile;
-         out[n].ind.Swizzle = dst.DimIndSwizzle;
-         out[n].ind.Index = dst.DimIndIndex;
+         out[di].dim.Indirect = 1;
+         out[di].dim.Index = dst.DimensionIndex;
+         out[di + 1].value = 0;
+         out[di + 1].ind.File = dst.DimIndFile;
+         out[di + 1].ind.Swizzle = dst.DimIndSwizzle;
+         out[di + 1].ind.Index = dst.DimIndIndex;
          if (!ureg->supports_any_inout_decl_range &&
              (dst.File == TGSI_FILE_INPUT || dst.File == TGSI_FILE_OUTPUT))
-            out[n].ind.ArrayID = 0;
+            out[di + 1].ind.ArrayID = 0;
          else
-            out[n].ind.ArrayID = dst.ArrayID;
+            out[di + 1].ind.ArrayID = dst.ArrayID;
       } else {
-         out[n].dim.Indirect = 0;
-         out[n].dim.Index = dst.DimensionIndex;
+         out[di].dim.Indirect = 0;
+         out[di].dim.Index = dst.DimensionIndex;
       }
-      n++;
    }
-
-   assert(n == size);
 }
 
 

@@ -122,6 +122,30 @@ exec_run( const struct sp_fragment_shader_variant *var,
 
    machine->NonHelperMask = quad->inout.mask;
    quad->inout.mask &= tgsi_exec_machine_run( machine, 0 );
+   {
+      extern void DbgPrint(const char *fmt, ...);
+      static unsigned q_cnt;
+      static unsigned q_minx = 0x7FFFFFFF, q_maxx, q_miny = 0x7FFFFFFF, q_maxy;
+      unsigned i;
+      for (i = 0; i < 4; i++) {
+         if (quad->inout.mask & (1u << i)) {
+            unsigned x = quad->input.x0 + (i & 1);
+            unsigned y = quad->input.y0 + ((i >> 1) & 1);
+            if (x < q_minx) q_minx = x;
+            if (x > q_maxx) q_maxx = x;
+            if (y < q_miny) q_miny = y;
+            if (y > q_maxy) q_maxy = y;
+         }
+      }
+      q_cnt++;
+      if ((q_cnt & 0xFFF) == 1)
+         DbgPrint("FSQ2 n=%u bbox=%u,%u-%u,%u o0=%08X%08X%08X%08X",
+                 q_cnt, q_minx, q_miny, q_maxx, q_maxy,
+                 machine->Outputs[0].xyzw[0].u[0],
+                 machine->Outputs[0].xyzw[1].u[0],
+                 machine->Outputs[0].xyzw[2].u[0],
+                 machine->Outputs[0].xyzw[3].u[0]);
+   }
    if (quad->inout.mask == 0)
       return false;
 
