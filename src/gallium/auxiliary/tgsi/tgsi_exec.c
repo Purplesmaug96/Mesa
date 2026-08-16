@@ -51,6 +51,8 @@
  *   Brian Paul
  */
 
+extern void DbgPrint(const char *fmt, ...);
+
 #include "util/compiler.h"
 #include "pipe/p_state.h"
 #include "pipe/p_shader_tokens.h"
@@ -1032,6 +1034,17 @@ tgsi_exec_machine_bind_shader(
    mach->Image = image;
    mach->Buffer = buffer;
 
+   { /* RAW TOKEN DUMP */
+      static unsigned dcnt;
+      if (dcnt < 3) { dcnt++;
+         const unsigned *t = (const unsigned *)tokens;
+         unsigned n = tgsi_num_tokens(tokens) < 48 ? tgsi_num_tokens(tokens) : 48;
+         for (unsigned tk = 0; tk < n; tk++) {
+            DbgPrint("TOK%02u %08X", tk, t[tk]);
+         }
+      }
+   }
+
    if (!tokens) {
       /* unbind and free all */
       FREE(mach->Declarations);
@@ -1192,6 +1205,43 @@ tgsi_exec_machine_bind_shader(
    FREE(mach->Instructions);
    mach->Instructions = instructions;
    mach->NumInstructions = numInstructions;
+
+   { /* PARSED DECLARATION DUMP */
+      static unsigned dcnt2;
+      if (dcnt2 < 3) { dcnt2++;
+         for (unsigned dd = 0; dd < numDeclarations; dd++) {
+            struct tgsi_full_declaration *dl = &declarations[dd];
+            DbgPrint("DEC F%u R%u..%u S%u SM%u", (unsigned)dl->Declaration.File,
+                     (unsigned)dl->Range.First, (unsigned)dl->Range.Last,
+                     (unsigned)dl->Semantic.Name, (unsigned)dl->Semantic.Index);
+         }
+      }
+   }
+
+   { /* PARSED INSTRUCTION DUMP */
+      static unsigned icnt;
+      if (icnt < 3) { icnt++;
+         for (unsigned ii = 0; ii < numInstructions; ii++) {
+            struct tgsi_full_instruction *in = &instructions[ii];
+            DbgPrint("INS%u OP%u D%u S%u", ii, (unsigned)in->Instruction.Opcode,
+                     (unsigned)in->Instruction.NumDstRegs,
+                     (unsigned)in->Instruction.NumSrcRegs);
+            for (unsigned dd = 0; dd < in->Instruction.NumDstRegs && dd < 2; dd++) {
+               const unsigned w = *(const unsigned *)&in->Dst[dd].Register;
+               DbgPrint("  D%u W%08X F%u I%u M%02X", dd, w,
+                        (unsigned)in->Dst[dd].Register.File,
+                        (unsigned)in->Dst[dd].Register.Index,
+                        (unsigned)in->Dst[dd].Register.WriteMask);
+            }
+            for (unsigned ss = 0; ss < in->Instruction.NumSrcRegs && ss < 4; ss++) {
+               const unsigned w = *(const unsigned *)&in->Src[ss].Register;
+               DbgPrint("  S%u W%08X F%u I%u", ss, w,
+                        (unsigned)in->Src[ss].Register.File,
+                        (unsigned)in->Src[ss].Register.Index);
+            }
+         }
+      }
+   }
 }
 
 
@@ -1207,6 +1257,7 @@ tgsi_exec_machine_create(mesa_shader_stage shader_type)
    memset(mach, 0, sizeof(*mach));
 
    mach->ShaderType = shader_type;
+   DbgPrint("TGSI machine created stage=%u", (unsigned)shader_type);
 
    if (shader_type != MESA_SHADER_COMPUTE) {
       mach->Inputs = align_malloc(sizeof(struct tgsi_exec_vector) * PIPE_MAX_SHADER_INPUTS, 16);
@@ -1417,6 +1468,9 @@ fetch_src_file_channel(const struct tgsi_exec_machine *mach,
          int pos = index2D->i[i] * TGSI_EXEC_MAX_INPUT_ATTRIBS + index->i[i];
          assert(pos >= 0);
          assert(pos < TGSI_MAX_PRIM_VERTICES * PIPE_MAX_ATTRIBS);
+         { static unsigned rcnt; if (rcnt++ < 24)              DbgPrint("IN POS%u SW%u V%08X S%u", pos, swizzle,                       mach->Inputs[pos].xyzw[swizzle].u[i], (unsigned)mach->ShaderType); }
+         if (pos >= TGSI_EXEC_MAX_INPUT_ATTRIBS)
+            pos &= TGSI_EXEC_MAX_INPUT_ATTRIBS - 1;
          chan->u[i] = mach->Inputs[pos].xyzw[swizzle].u[i];
       }
       break;
@@ -1618,6 +1672,18 @@ fetch_source(const struct tgsi_exec_machine *mach,
    }
 }
 
+#define PROBE_ADDR 0xFF971000u
+#define PROBE_STORE(cnt, f, idx, dwv) do { \
+   static unsigned dbg_pc[8]; \
+   if (dbg_pc[cnt] < 12) { \
+      dbg_pc[cnt]++; \
+      DbgPrint("ST C%u DW%08X O%u CH%u V%08X S%u I%04X", \
+               (unsigned)(f), (unsigned)(dwv), (unsigned)(idx), \
+               (unsigned)chan_index, chan ? (unsigned)chan->u[0] : 0, \
+               (unsigned)mach->ShaderType, (unsigned)TGSI_QUAD_SIZE); \
+   } \
+} while (0)
+
 static union tgsi_exec_channel *
 store_dest_dstret(struct tgsi_exec_machine *mach,
                  const union tgsi_exec_channel *chan,
@@ -1673,7 +1739,8 @@ store_dest_dstret(struct tgsi_exec_machine *mach,
       break;
 
    case TGSI_FILE_OUTPUT:
-      index = mach->OutputVertexOffset + ((dstword >> 24) & 0xf);
+      index = mach->OutputVertexOffset + reg->Register.Index;
+      PROBE_STORE(1, 1, index, dstword);
       dst = &mach->Outputs[offset + index].xyzw[chan_index];
 #if 0
       debug_printf("NumOutputs = %d, TEMP_O_C/I = %d, redindex = %d\n",
@@ -1690,13 +1757,14 @@ store_dest_dstret(struct tgsi_exec_machine *mach,
       break;
 
    case TGSI_FILE_TEMPORARY:
-      index = (dstword >> 24) & 0xf;
+      index = reg->Register.Index;
+      PROBE_STORE(2, 2, index, dstword);
       assert( index < TGSI_EXEC_NUM_TEMPS );
       dst = &mach->Temps[offset + index].xyzw[chan_index];
       break;
 
    case TGSI_FILE_ADDRESS:
-      index = (dstword >> 24) & 0xf;
+      index = reg->Register.Index;
       assert(index >= 0 && index < ARRAY_SIZE(mach->Addrs));
       dst = &mach->Addrs[index].xyzw[chan_index];
       break;
@@ -5831,6 +5899,13 @@ uint
 tgsi_exec_machine_run( struct tgsi_exec_machine *mach, int start_pc )
 {
    unsigned i;
+
+   static unsigned dbg_run_cnt;
+   if (dbg_run_cnt < 12) {
+      dbg_run_cnt++;
+      DbgPrint("TGSI run stage=%u pc=%u naren=%u nins=%u", (unsigned)mach->ShaderType, start_pc, mach->NumInstructions, mach->NumDeclarations);
+      DbgPrint("RUN I0a%08X I0b%08X I1a%08X I1b%08X", mach->Inputs[0].xyzw[0].u[0], mach->Inputs[0].xyzw[1].u[0], mach->Inputs[1].xyzw[0].u[0], mach->Inputs[1].xyzw[1].u[0]); 
+   }
 
    mach->pc = start_pc;
 

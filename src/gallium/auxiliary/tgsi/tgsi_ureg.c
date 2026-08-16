@@ -1125,6 +1125,25 @@ ureg_emit_src( struct ureg_program *ureg,
    assert(src.File != TGSI_FILE_NULL);
    assert(src.File < TGSI_FILE_COUNT);
 
+   { /* EMIT-SRC TRACE (xbox360) */
+      extern void DbgPrint(const char *fmt, ...);
+      static unsigned es_cnt;
+      const unsigned *w = (const unsigned *)&src;
+      if (es_cnt++ < 4000)
+         DbgPrint("ESRC st=%u sz=%u w0=%08X w1=%08X w2=%08X w3=%08X "
+                  "f=%u sw=(%u,%u,%u,%u) ind=%u dind=%u dim=%u "
+                  "abs=%u neg=%u indf=%u indsw=%u dindf=%u dindsw=%u "
+                  "idx=%d indidx=%d dimidx=%d dindidx=%d arr=%u",
+                 (unsigned)ureg->processor, (unsigned)sizeof(src),
+                 w[0], w[1], w[2], w[3],
+                 src.File, src.SwizzleX, src.SwizzleY, src.SwizzleZ,
+                 src.SwizzleW, src.Indirect, src.DimIndirect, src.Dimension,
+                 src.Absolute, src.Negate, src.IndirectFile,
+                 src.IndirectSwizzle, src.DimIndFile, src.DimIndSwizzle,
+                 src.Index, src.IndirectIndex, src.DimensionIndex,
+                 src.DimIndIndex, src.ArrayID);
+   }
+
    out[n].value = 0;
    out[n].src.File = src.File;
    out[n].src.SwizzleX = src.SwizzleX;
@@ -2134,6 +2153,20 @@ const struct tgsi_token *ureg_finalize( struct ureg_program *ureg )
    }
 
    tokens = &ureg->domain[DOMAIN_DECL].tokens[0].token;
+
+   { /* WRITER-SIDE TOKEN DUMP (xbox360) */
+      extern void DbgPrint(const char *fmt, ...);
+      static unsigned ureg_dcnt;
+      if (ureg_dcnt++ < 512) {
+         const unsigned *t = (const unsigned *)tokens;
+         unsigned n = ureg->domain[DOMAIN_DECL].count;
+         DbgPrint("UREG%u stage=%u n=%u", ureg_dcnt - 1,
+                 (unsigned)ureg->processor, n);
+         if (n > 64) n = 64;
+         for (unsigned tk = 0; tk < n; tk++)
+            DbgPrint("UREG%02u %08X", tk, t[tk]);
+      }
+   }
 
    if (0) {
       debug_printf("%s: emitted shader %d tokens:\n", __func__,
