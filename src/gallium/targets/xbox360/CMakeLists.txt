@@ -1,16 +1,22 @@
 # Mesa3D - src/gallium/targets/xbox360/
 # SPDX-License-Identifier: MIT
 #
-# "xbox360" Gallium backend: the existing softpipe software rasterizer,
-# wired by st/mesa into a headless GL context that renders into a
-# system-memory colour buffer.  Homebrew on the Xbox 360 blits that buffer
-# into the Xenos front buffer and presents it with raw GPU ring-buffer
-# commands (there is no D3D9/GDI/X/DRM on the console).
+# "xbox360" Gallium backend: a headless GL context for homebrew on the
+# Xbox 360 (no D3D9/GDI/X/DRM on the console).  The GL frontend glue
+# (xbox360_api.c) is renderer-agnostic; the actual screen comes from
+# softpipe/ (software, system-memory rendering, the fallback) or xenos/
+# (the PM4 hardware driver, src/gallium/drivers/xenos/) selected with
+# MESA_OP_XBOX360_XENOS.
 #
 # The result is a plain static archive libxbox360.a, since XEX images are
 # statically linked PE binaries.
 
-add_library(xbox360 STATIC xbox360_api.c xbox360_api.h)
+option(MESA_OP_XBOX360_XENOS "xbox360: use the xenos hardware (PM4) driver instead of softpipe" OFF)
+
+add_library(xbox360 STATIC
+  xbox360_api.c xbox360_api.h xbox360_screen.h
+  $<$<BOOL:${MESA_OP_XBOX360_XENOS}>:xenos/xbox360_xenos.c>
+  $<$<NOT:$<BOOL:${MESA_OP_XBOX360_XENOS}>>:softpipe/xbox360_softpipe.c>)
 set_target_properties(xbox360 PROPERTIES
   OUTPUT_NAME xbox360_core
   C_VISIBILITY_PRESET hidden)
@@ -19,6 +25,10 @@ target_include_directories(xbox360 PRIVATE
   "${inc_gallium}" "${inc_gallium_aux}" "${inc_util}"
   "${inc_gallium_drivers}" "${inc_gallium_winsys}" "${inc_gallium_winsys_sw}"
   "${CMAKE_SOURCE_DIR}/src/mesa/glapi")
+if(MESA_OP_XBOX360_XENOS)
+  target_include_directories(xbox360 PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/gallium/drivers/xenos")
+endif()
 
 # Static link ring: mesa, gallium, softpipe, glapi and the supporting
 # compiler/util archives (mirrors the dri target).  All local archives go in
@@ -41,6 +51,10 @@ set(_x360_ring
   "${CMAKE_BINARY_DIR}/src/util/libmesa_util_simd.a"
   "${CMAKE_BINARY_DIR}/src/c11/impl/libmesa_util_c11.a"
   "${CMAKE_BINARY_DIR}/src/gallium/winsys/sw/null/libws_null.a")
+if(MESA_OP_XBOX360_XENOS)
+  list(APPEND _x360_ring
+    "${CMAKE_BINARY_DIR}/src/gallium/drivers/xenos/libxenos.a")
+endif()
 if(host_cpu_family STREQUAL "x86" OR host_cpu_family STREQUAL "x86_64")
   list(APPEND _x360_ring
     "${CMAKE_BINARY_DIR}/src/mesa/libmesa_sse41.a"
@@ -88,6 +102,9 @@ add_custom_target(xbox360_merged ALL
 set(_x360_ring_targets
   softpipe mesa gallium galliumvl glapi blake3 glsl glcpp vtn nir compiler
   mesa_util mesa_util_simd mesa_util_c11 ws_null)
+if(MESA_OP_XBOX360_XENOS)
+  list(APPEND _x360_ring_targets xenos)
+endif()
 if(host_cpu_family STREQUAL "x86" OR host_cpu_family STREQUAL "x86_64")
   list(APPEND _x360_ring_targets mesa_sse41 mesa_util_clflush)
 endif()
@@ -97,6 +114,8 @@ add_dependencies(xbox360 ${_x360_ring_targets})
 # merged stack instead.
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libxbox360.a" DESTINATION "${libdir}")
 install(FILES xbox360_api.h DESTINATION include/xbox360)
+install(FILES "${CMAKE_SOURCE_DIR}/src/gallium/drivers/xenos/gpu/xenos_gpu.h"
+  DESTINATION include/xbox360)
 
 # Real GL entry points (glClear, glBegin, ...) for the legacy API.
 # The shared-glapi dispatch library only provides the table plumbing and

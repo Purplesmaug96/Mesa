@@ -1128,14 +1128,6 @@ ureg_emit_src( struct ureg_program *ureg,
    assert(src.File != TGSI_FILE_NULL);
    assert(src.File < TGSI_FILE_COUNT);
 
-   { /* EMIT-SRC TRACE (xbox360) */
-      extern void DbgPrint(const char *fmt, ...);
-      static unsigned es_cnt;
-      if (es_cnt++ < 4000)
-         DbgPrint("ESRCD f=%u i=%u d=%u w0=%08X w1=%08X w2=%08X w3=%08X",
-                 src.File, (unsigned)src.Indirect, (unsigned)src.Dimension,
-                 w[0], w[1], w[2], w[3]);
-   }
 
    vo[0].value = 0;
    vo[0].src.File = src.File;
@@ -1159,15 +1151,6 @@ ureg_emit_src( struct ureg_program *ureg,
       vo[di].value = 0u;
    }
 
-   {
-      extern void DbgPrint(const char *fmt, ...);
-      static unsigned pst_cnt;
-      if (pst_cnt++ < 4000)
-         DbgPrint("ESRCW st=%u n=%u t0=%08X t1=%08X t2=%08X",
-                  (unsigned)ureg->processor, size,
-                  vo[0].value, size > 1 ? vo[1].value : 0,
-                  size > 2 ? vo[2].value : 0);
-   }
 }
 
 
@@ -2123,20 +2106,6 @@ const struct tgsi_token *ureg_finalize( struct ureg_program *ureg )
    }
 
    tokens = &ureg->domain[DOMAIN_DECL].tokens[0].token;
-
-   { /* WRITER-SIDE TOKEN DUMP (xbox360) */
-      extern void DbgPrint(const char *fmt, ...);
-      static unsigned ureg_dcnt;
-      if (ureg_dcnt++ < 512) {
-         const unsigned *t = (const unsigned *)tokens;
-         unsigned n = ureg->domain[DOMAIN_DECL].count;
-         DbgPrint("UREG%u stage=%u n=%u", ureg_dcnt - 1,
-                 (unsigned)ureg->processor, n);
-         if (n > 64) n = 64;
-         for (unsigned tk = 0; tk < n; tk++)
-            DbgPrint("UREG%02u %08X", tk, t[tk]);
-      }
-   }
 
    if (0) {
       debug_printf("%s: emitted shader %d tokens:\n", __func__,

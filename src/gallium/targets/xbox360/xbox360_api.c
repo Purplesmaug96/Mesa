@@ -28,13 +28,10 @@
 #include "pipe/p_screen.h"
 
 #include "frontend/api.h"
-#include "frontend/sw_winsys.h"
-#include "softpipe/sp_public.h"
-#include "sw/null/null_sw_winsys.h"
-
 #include "state_tracker/st_context.h"
 
 #include "xbox360_api.h"
+#include "xbox360_screen.h"
 
 struct xbox360_display
 {
@@ -185,7 +182,6 @@ bool
 xbox360_create(struct xbox360_display **out, uint32_t width, uint32_t height)
 {
    struct xbox360_display *d;
-   struct sw_winsys *ws;
    enum st_context_error sterr = ST_CONTEXT_ERROR_NO_MEMORY;
    struct st_context_attribs attribs;
 
@@ -193,20 +189,13 @@ xbox360_create(struct xbox360_display **out, uint32_t width, uint32_t height)
    if (!d)
       return false;
 
-   ws = null_sw_create();
-   if (!ws) {
-      free(d);
-      return false;
-   }
-
-   DbgPrint("xbox360_create: null_sw ok");
-
-   d->fscreen.screen = softpipe_create_screen(ws);
+   d->fscreen.screen = xbox360_screen_create();
    if (!d->fscreen.screen) {
       free(d);
       return false;
    }
-   DbgPrint("xbox360_create: softpipe screen ok");
+   DbgPrint("xbox360_create: screen ok (%s)",
+            d->fscreen.screen->get_name(d->fscreen.screen));
    d->fscreen.get_param = xbox360_get_param;
 
    d->width = width;

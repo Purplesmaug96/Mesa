@@ -1,0 +1,76 @@
+/*
+ * xbox360 target - hardware (xenos) screen creation.
+ *
+ * Wires the xenos Gallium driver to the console: GPU-visible memory comes
+ * from the physical heap (MmAllocatePhysicalMemoryEx), and command buffers
+ * go to the primary ring once the ring is attached (the samples initialise
+ * it in screen.c; the GL driver's ring_submit hook is still a stub until the
+ * draw path exists).
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <stdio.h>
+
+#include <xecore/xboxkrnl.h>
+
+#include "pipe/p_screen.h"
+
+#include "xenos_public.h"
+#include "xenos_winsys.h"
+
+#include "../xbox360_screen.h"
+
+struct xenos_xecore_winsys
+{
+   struct xenos_winsys base;
+};
+
+static void *
+xenos_xecore_alloc(void *ws, unsigned size, unsigned align_log2)
+{
+   return MmAllocatePhysicalMemoryEx(REGION_AUTO, size, 4, 0,
+                                     0xFFFFFFFFu, 1u << align_log2);
+}
+
+static void
+xenos_xecore_free(void *ws, void *ptr)
+{
+   if (ptr)
+      MmFreePhysicalMemory(REGION_AUTO, ptr);
+}
+
+static uint64_t
+xenos_xecore_get_physical(void *ws, void *guest_va)
+{
+   return MmGetPhysicalAddress(guest_va);
+}
+
+static void
+xenos_xecore_ring_submit(void *ws, const uint32_t *dwords_be, unsigned ndwords)
+{
+   /* The GL driver does not own the primary ring; screen.c (samples)
+    * initialises it for VdSwap.  Once the hardware draw path lands, this
+    * submits through the shared ring (see xe_gpu_ring_submit in
+    * drivers/xenos/gpu/xenos_gpu.c) keeping the 64-dword block alignment. */
+   fprintf(stderr, "xenos: ring_submit %u dwords (ring not attached)\n",
+           ndwords);
+}
+
+struct pipe_screen *
+xbox360_screen_create(void)
+{
+   struct xenos_xecore_winsys *winsys =
+      (struct xenos_xecore_winsys *)calloc(1, sizeof(*winsys));
+
+   if (!winsys)
+      return NULL;
+
+   winsys->base.ws = winsys;
+   winsys->base.alloc = xenos_xecore_alloc;
+   winsys->base.free = xenos_xecore_free;
+   winsys->base.get_physical = xenos_xecore_get_physical;
+   winsys->base.ring_submit = xenos_xecore_ring_submit;
+
+   return xenos_screen_create(&winsys->base);
+}

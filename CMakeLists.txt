@@ -349,6 +349,9 @@ endif()
 if("${gallium_drivers}" MATCHES "(^|;)softpipe(;|$)")
   set(with_gallium_softpipe ON)
 endif()
+if("${gallium_drivers}" MATCHES "(^|;)xenos(;|$)")
+  set(with_gallium_xenos ON)
+endif()
 if("${gallium_drivers}" MATCHES "(^|;)llvmpipe(;|$)")
   set(with_gallium_llvmpipe ON)
 endif()
@@ -403,11 +406,14 @@ endif()
 # xbox360: the Xbox 360 backend.  It is built on top of the softpipe
 # software rasterizer (renders into a system-memory colour buffer that the
 # caller presents to the Xenos scanout path), so selecting it also enables
-# softpipe.
+# softpipe.  The hardware xenos driver is built alongside; MESA_OP_XBOX360_XENOS
+# switches the backend from softpipe to the PM4 driver once the hardware
+# path renders.
 set(with_gallium_xbox360 OFF)
 if("${gallium_drivers}" MATCHES "(^|;)xbox360(;|$)")
   set(with_gallium_xbox360 ON)
   set(with_gallium_softpipe ON)
+  set(with_gallium_xenos ON)
 endif()
 # xbox360: util_cpu_detect probes the CPU with an xxland (VSX) instruction to
 # check whether VSX exists.  Real consoles execute it and handle the resulting
@@ -418,6 +424,12 @@ endif()
 option(X360_CPU_PROBE_VSX "xbox360: emit the xxland VSX CPU probe in util_cpu_detect" ON)
 if(with_gallium_xbox360 AND NOT X360_CPU_PROBE_VSX)
   add_compile_definitions(-DXBOX360_NO_VSX_PROBE)
+endif()
+# xbox360: the ppc32 backend has no SIMD, and LLVM's loop/SLP vectorizer
+# crashes on some units (e.g. src/util/anon_file.c) at -O2.  Keep the whole
+# build scalar; there is nothing to vectorize for this target anyway.
+if(with_gallium_xbox360)
+  add_compile_options(-fno-vectorize -fno-slp-vectorize)
 endif()
 set(with_gallium_swrast OFF)
 if(with_gallium_softpipe OR with_gallium_llvmpipe)
