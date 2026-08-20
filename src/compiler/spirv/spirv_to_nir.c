@@ -56,9 +56,11 @@ static const struct spirv_capabilities implemented_capabilities = {
    .ComputeDerivativeGroupQuadsKHR = true,
    .ConstantDataKHR = true,
    .CooperativeMatrixKHR = true,
+   .CooperativeMatrixConversionsEXT = true,
+   .CooperativeMatrixGetCoordinateEXT = true,
+   .CooperativeMatrixReductionsEXT = true,
+   .CooperativeMatrixPerElementOperationsEXT = true,
    .CooperativeMatrixConversionsNV = true,
-   .CooperativeMatrixReductionsNV = true,
-   .CooperativeMatrixPerElementOperationsNV = true,
    .CooperativeMatrixTensorAddressingNV = true,
    .CooperativeMatrixBlockLoadsNV = true,
    .CoreBuiltinsARM = true,
@@ -4383,10 +4385,15 @@ fill_common_atomic_sources(struct vtn_builder *b, SpvOp opcode,
 }
 
 static nir_def *
-get_image_coord(struct vtn_builder *b, uint32_t value)
+get_image_coord(struct vtn_builder *b, uint32_t value,
+                const struct glsl_type *image_type)
 {
    nir_def *coord = vtn_get_nir_ssa(b, value);
-   /* The image_load_store intrinsics assume a 4-dim coordinate */
+   unsigned num_components =
+      glsl_get_sampler_coordinate_components(image_type);
+
+   /* Keep only the components used by the image target, then pad to vec4. */
+   coord = nir_trim_vector(&b->nb, coord, num_components);
    return nir_pad_vec4(&b->nb, coord);
 }
 
@@ -4456,7 +4463,7 @@ vtn_handle_image(struct vtn_builder *b, SpvOp opcode,
       val->image = vtn_alloc(b, struct vtn_image_pointer);
 
       val->image->image = vtn_nir_deref(b, w[3]);
-      val->image->coord = get_image_coord(b, w[4]);
+      val->image->coord = get_image_coord(b, w[4], val->image->image->type);
       val->image->sample = vtn_get_nir_ssa(b, w[5]);
       val->image->lod = nir_imm_int(&b->nb, 0);
       val->image->format = type->image_format;
@@ -4470,7 +4477,7 @@ vtn_handle_image(struct vtn_builder *b, SpvOp opcode,
       val->image->image = nir_build_deref_cast(&b->nb, vtn_get_nir_ssa(b, w[4]),
                                                nir_var_image,
                                                type->glsl_image, 0);
-      val->image->coord = get_image_coord(b, w[5]);
+      val->image->coord = get_image_coord(b, w[5], val->image->image->type);
       val->image->sample = vtn_get_nir_ssa(b, w[6]);
       val->image->lod = nir_imm_int(&b->nb, 0);
       val->image->format = type->image_format;
@@ -4549,7 +4556,7 @@ vtn_handle_image(struct vtn_builder *b, SpvOp opcode,
       res_val = vtn_untyped_value(b, w[3]);
       image.image = vtn_get_image(b, w[3], &access, &image_format);
       image.format = image_format;
-      image.coord = get_image_coord(b, w[4]);
+      image.coord = get_image_coord(b, w[4], image.image->type);
 
       operands = count > 5 ? w[5] : SpvImageOperandsMaskNone;
 
@@ -4590,7 +4597,7 @@ vtn_handle_image(struct vtn_builder *b, SpvOp opcode,
       res_val = vtn_untyped_value(b, w[1]);
       image.image = vtn_get_image(b, w[1], &access, &image_format);
       image.format = image_format;
-      image.coord = get_image_coord(b, w[2]);
+      image.coord = get_image_coord(b, w[2], image.image->type);
 
       /* texel = w[3] */
 
@@ -7516,6 +7523,7 @@ vtn_handle_body_instruction(struct vtn_builder *b, SpvOp opcode,
    case SpvOpCooperativeMatrixStoreKHR:
    case SpvOpCooperativeMatrixLengthKHR:
    case SpvOpCooperativeMatrixMulAddKHR:
+   case SpvOpCooperativeMatrixGetCoordinateEXT:
    case SpvOpCooperativeMatrixConvertNV:
    case SpvOpCooperativeMatrixTransposeNV:
    case SpvOpCooperativeMatrixReduceNV:

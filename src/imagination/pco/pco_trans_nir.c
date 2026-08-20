@@ -15,6 +15,7 @@
 #include "pco.h"
 #include "pco_builder.h"
 #include "pco_internal.h"
+#include "pvr_iface.h"
 #include "util/bitset.h"
 #include "util/list.h"
 #include "util/macros.h"
@@ -185,7 +186,7 @@ pco_ref_nir_alu_src_t(const nir_alu_instr *alu, unsigned src, trans_ctx *tctx)
  */
 static enum pco_mcu_cache_mode_ld get_ld_cache_mode(nir_intrinsic_instr *intr)
 {
-   if (!nir_intrinsic_has_access(intr))
+   if (PCO_DEBUG(NO_DMA_CACHE) || !nir_intrinsic_has_access(intr))
       return PCO_MCU_CACHE_MODE_LD_NORMAL;
 
    enum gl_access_qualifier access_qual = nir_intrinsic_access(intr);
@@ -205,7 +206,7 @@ static enum pco_mcu_cache_mode_ld get_ld_cache_mode(nir_intrinsic_instr *intr)
 static enum pco_mcu_cache_mode_st get_st_cache_mode(nir_intrinsic_instr *intr,
                                                     trans_ctx *tctx)
 {
-   if (!nir_intrinsic_has_access(intr))
+   if (PCO_DEBUG(NO_DMA_CACHE) || !nir_intrinsic_has_access(intr))
       return PCO_MCU_CACHE_MODE_ST_WRITE_THROUGH;
 
    enum gl_access_qualifier access_qual = nir_intrinsic_access(intr);
@@ -370,10 +371,8 @@ static inline pco_instr *build_itr(pco_builder *b,
    return instr;
 }
 
-static pco_ref fs_is_single_sampled(trans_ctx *tctx)
+static pco_ref fs_is_single_sampled_covmsk(trans_ctx *tctx)
 {
-   assert(tctx->stage == MESA_SHADER_FRAGMENT);
-
    /* n samples = ...
     * 1 = 0b00000001
     * 2 = 0b00000011
@@ -405,6 +404,51 @@ static pco_ref fs_is_single_sampled(trans_ctx *tctx)
             .tst_type_main = PCO_TST_TYPE_MAIN_U32);
 
    return is_single_sampled;
+}
+
+static pco_ref fs_is_single_sampled_meta(trans_ctx *tctx)
+{
+   assert(tctx->shader->data.fs.meta.count > 0);
+   pco_ref fs_meta = pco_ref_new_ssa32(tctx->func);
+   pco_mov(&tctx->b,
+           fs_meta,
+           pco_ref_hwreg(tctx->shader->data.fs.meta.start,
+                         PCO_REG_CLASS_SHARED));
+
+   pco_ref sample_shading_bit = pco_ref_new_ssa32(tctx->func);
+   pco_movi32(&tctx->b,
+              sample_shading_bit,
+              pco_ref_imm32(PVR_FS_META_SAMPLE_SHADING));
+
+   pco_ref sample_shading_len = pco_ref_new_ssa32(tctx->func);
+   pco_movi32(&tctx->b,
+              sample_shading_len,
+              pco_ref_imm32(PVR_FS_META_SAMPLE_SHADING_LENGTH));
+
+   pco_ref sample_shading = pco_ref_new_ssa32(tctx->func);
+   pco_ubfe(&tctx->b,
+            sample_shading,
+            fs_meta,
+            sample_shading_bit,
+            sample_shading_len);
+
+   pco_ref is_single_sampled = pco_ref_new_ssa32(tctx->func);
+   pco_tstz(&tctx->b,
+            is_single_sampled,
+            pco_ref_null(),
+            sample_shading,
+            .tst_type_main = PCO_TST_TYPE_MAIN_U32);
+
+   return is_single_sampled;
+}
+
+/* TODO: revisit */
+static pco_ref fs_is_single_sampled(trans_ctx *tctx)
+{
+   assert(tctx->stage == MESA_SHADER_FRAGMENT);
+
+   return tctx->shader->is_internal ? fs_is_single_sampled_covmsk(tctx)
+                                    : fs_is_single_sampled_meta(tctx);
 }
 
 /**
@@ -2199,6 +2243,49 @@ static pco_instr *lower_alphatst(trans_ctx *tctx,
                    pco_zero);
 }
 
+static pco_instr *lower_isp_feedback(trans_ctx *tctx,
+                                     nir_intrinsic_instr *intr,
+                                     pco_ref discard_src,
+                                     pco_ref depth_src)
+{
+   assert(tctx->stage == MESA_SHADER_FRAGMENT);
+
+   bool does_discard = !nir_src_is_undef(intr->src[0]);
+   bool does_depthf = !nir_src_is_undef(intr->src[1]);
+
+   if (!does_discard && !does_depthf)
+      return NULL;
+
+   if (does_discard) {
+      pco_tstz(&tctx->b,
+               pco_ref_null(),
+               pco_ref_pred(PCO_PRED_P0),
+               discard_src,
+               .tst_type_main = PCO_TST_TYPE_MAIN_U32);
+   }
+
+   pco_instr *instr;
+   if (does_depthf) {
+      instr = pco_depthf(&tctx->b,
+                         pco_ref_drc(PCO_DRC_0),
+                         depth_src,
+                         .olchk = tctx->olchk);
+   } else {
+      instr = pco_alphaf(&tctx->b,
+                         pco_ref_null(),
+                         pco_ref_drc(PCO_DRC_0),
+                         pco_zero,
+                         pco_zero,
+                         pco_7,
+                         .olchk = tctx->olchk);
+   }
+
+   if (does_discard)
+      pco_instr_set_exec_cnd(instr, PCO_EXEC_CND_E1_Z1);
+
+   return instr;
+}
+
 static inline unsigned lookup_reg_bits(nir_intrinsic_instr *intr)
 {
    nir_def *reg;
@@ -2754,6 +2841,13 @@ static pco_instr *trans_intr(trans_ctx *tctx, nir_intrinsic_instr *intr)
       break;
    }
 
+   case nir_intrinsic_dma_flush_pco:
+      assert(pco_ref_get_chans(dest) == 1u);
+      assert(pco_ref_get_chans(src[0]) == 2u);
+
+      instr = pco_flush_dma(&tctx->b, dest, src[0]);
+      break;
+
    /* Vertex sysvals. */
    case nir_intrinsic_load_vertex_id:
    case nir_intrinsic_load_instance_id:
@@ -2826,39 +2920,9 @@ static pco_instr *trans_intr(trans_ctx *tctx, nir_intrinsic_instr *intr)
       instr = lower_alphatst(tctx, dest, src[0], src[1], src[2]);
       break;
 
-   case nir_intrinsic_isp_feedback_pco: {
-      assert(tctx->stage == MESA_SHADER_FRAGMENT);
-      bool does_discard = !nir_src_is_undef(intr->src[0]);
-      bool does_depthf = !nir_src_is_undef(intr->src[1]);
-
-      does_depthf &= (tctx->shader->data.fs.uses.depth_feedback &&
-                      !tctx->shader->data.fs.uses.early_frag);
-
-      if (does_discard) {
-         pco_tstz(&tctx->b,
-                  pco_ref_null(),
-                  pco_ref_pred(PCO_PRED_P0),
-                  src[0],
-                  .tst_type_main = PCO_TST_TYPE_MAIN_U32);
-      }
-
-      instr = does_depthf ? pco_depthf(&tctx->b,
-                                       pco_ref_drc(PCO_DRC_0),
-                                       src[1],
-                                       .olchk = tctx->olchk)
-                          : pco_alphaf(&tctx->b,
-                                       pco_ref_null(),
-                                       pco_ref_drc(PCO_DRC_0),
-                                       pco_zero,
-                                       pco_zero,
-                                       pco_7,
-                                       .olchk = tctx->olchk);
-
-      if (does_discard)
-         pco_instr_set_exec_cnd(instr, PCO_EXEC_CND_E1_Z1);
-
+   case nir_intrinsic_isp_feedback_pco:
+      instr = lower_isp_feedback(tctx, intr, src[0], src[1]);
       break;
-   }
 
    case nir_intrinsic_alpha_to_coverage:
       assert(tctx->stage == MESA_SHADER_FRAGMENT);

@@ -62,7 +62,6 @@ spec@arb_depth_texture@texwrap formats@GL_DEPTH_COMPONENT32- NPOT,Fail
 spec@arb_direct_state_access@gettextureimage-formats init-by-rendering,Fail
 spec@arb_direct_state_access@gettextureimage-formats,Fail
 spec@arb_framebuffer_object@fbo-blit-scaled-linear,Fail
-spec@arb_point_sprite@arb_point_sprite-checkerboard,Fail
 spec@arb_point_sprite@arb_point_sprite-mipmap,Fail
 spec@arb_shader_storage_buffer_object@compiler@atomicmin-swizzle.vert,Fail
 spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgrad,Fail
@@ -72,7 +71,6 @@ spec@arb_texture_buffer_object@texture-buffer-size-clamp@r8ui_texture_buffer_siz
 spec@arb_texture_buffer_object@texture-buffer-size-clamp@rg8ui_texture_buffer_size_via_sampler,Fail
 spec@arb_texture_buffer_object@texture-buffer-size-clamp@rgba8ui_texture_buffer_size_via_sampler,Fail
 spec@arb_texture_rectangle@1-1-linear-texture,Fail
-spec@arb_texture_view@tex-view,Fail
 spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
@@ -180,8 +178,6 @@ spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-3d.frag,Fail
 spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-3d.vert,Fail
 spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-cube.frag,Fail
 spec@nv_image_formats@compiler@declaration-disallow-rgba16-unorm-cube.vert,Fail
-spec@oes_point_sprite@arb_point_sprite-checkerboard_gles1,Fail
-spec@oes_shader_io_blocks@compiler@layout-location-aliasing.vert,Fail
 
 # A sub-case involving polygon stipple fails because driver doesn't implement
 # stipple
@@ -447,11 +443,6 @@ vk_xfermodes3,Fail
 
 # Bisected to 08b5876c379 ("v3d: only expose rgba buffer-textures")
 TransferPixelsTest,Fail
-
-# uprev Piglit in Mesa
-spec@ext_yuv_target@execution@rgb_2_yuv,Fail
-spec@ext_yuv_target@execution@yuv_2_rgb,Fail
-spec@glsl-1.30@execution@glsl-packed-back-color,Fail
 
 # VKCTS 1.4.5.3 -> 1.4.6.1 uprev
 dEQP-VK.robustness.buffer_access.through_pointers.graphics.writes.vertex.4B_in_memory_with_scalar_f32,Fail

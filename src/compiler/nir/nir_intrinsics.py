@@ -1286,6 +1286,25 @@ intrinsic("deref_texture_src", src_comp=[1], dest_comp=1,
 intrinsic("load_fs_input_interp_deltas", src_comp=[1], dest_comp=3,
           indices=[BASE, COMPONENT, IO_SEMANTICS], flags=[CAN_ELIMINATE, CAN_REORDER])
 
+# For any given polygon, its barycentric coordinates and rhw (reciprocal
+# homogeneous W) can be calculated for any screen-space coordinate using a plane
+# equation. polygon_plane_eqn_coefficients_intel returns coefficients of this
+# plane equation, which can then be used to calculate barys and rhw like so:
+# 
+#   vec2 pos = gl_FragCoord.xy - xy_origin /* + offset for interpolateAtOffset */
+#   float result = dot(plane_eqn_*_intel, vec3(pos.xy, 1.0))
+for name in ["bary1", "bary2", "rhw"]:
+    intrinsic(f"plane_eqn_{name}_intel", src_comp=[], dest_comp=3,
+              flags=[CAN_ELIMINATE, CAN_REORDER], indices=[INTERP_MODE],
+              bit_sizes=[32])
+
+# Floating-point screen-space origin for plane coordinates.
+intrinsic("plane_eqn_origin_intel", src_comp=[], dest_comp=2,
+          flags=[CAN_ELIMINATE, CAN_REORDER], indices=[INTERP_MODE], bit_sizes=[32])
+
+# Raw sample_pos payload, does not imply per-sample shading.
+system_value("sample_pos_intel", 1, bit_sizes=[16])
+
 # Load operations pull data from some piece of GPU memory.  All load
 # operations operate in terms of offsets into some piece of theoretical
 # memory.  Loads from externally visible memory (UBO and SSBO) simply take a
@@ -1353,7 +1372,7 @@ load("shared", [1], [BASE, ACCESS, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE])
 # src[] = { offset }.
 load("task_payload", [1], [BASE, ACCESS, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE])
 # src[] = { offset }.
-load("push_constant", [1], [BASE, RANGE, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE, CAN_REORDER])
+load("push_constant", [1], [BASE, ACCESS, RANGE, ALIGN_MUL, ALIGN_OFFSET], [CAN_ELIMINATE, CAN_REORDER])
 # src[] = { offset }.
 load("constant", [1], [BASE, RANGE, ACCESS, ALIGN_MUL, ALIGN_OFFSET],
      [CAN_ELIMINATE, CAN_REORDER])
@@ -1511,7 +1530,8 @@ intrinsic("cmat_bitcast", src_comp=[-1, -1])
 intrinsic("cmat_extract", src_comp=[-1, 1], dest_comp=1)
 intrinsic("cmat_insert", src_comp=[-1, 1, -1, 1])
 intrinsic("cmat_copy", src_comp=[-1, -1])
-intrinsic("cmat_transpose", src_comp=[-1, -1], indices=[FP_MATH_CTRL])
+intrinsic("cmat_transpose", src_comp=[-1, -1], indices=[SATURATE, CMAT_SIGNED_MASK, FP_MATH_CTRL])
+intrinsic("cmat_get_coordinate", src_comp=[1], dest_comp=2, indices=[CMAT_DESC], bit_sizes=[32])
 
 # src[] = { deref }.
 load("buffer_ptr_deref", [-1], [ACCESS, RESOURCE_TYPE],
@@ -1724,19 +1744,21 @@ intrinsic("resbase_ir3", src_comp=[1], dest_comp=2, flags=[CAN_ELIMINATE, CAN_RE
 load("attr_pan", [1, 1, 1], [DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
 
 # src[] = { idx, bary }
-load("var_pan", [1, 2], [DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
+# FLAGS is enum pan_bi_sample_loc
+load("var_pan", [1, 1], [DEST_TYPE, IO_SEMANTICS, FLAGS], [CAN_ELIMINATE, CAN_REORDER])
 # src[] = { idx }
 load("var_flat_pan", [1], [DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
 # src[] = { offset, bary }
-load("var_buf_pan", [1, 2], [SRC_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
+# FLAGS is enum pan_bi_sample_loc
+load("var_buf_pan", [1, 1], [SRC_TYPE, IO_SEMANTICS, FLAGS], [CAN_ELIMINATE, CAN_REORDER])
 # src[] = { offset }
 load("var_buf_flat_pan", [1], [SRC_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
 
 # Panfrost-specific intrinsic to load special varyings, can load point coords
 # and frag_[zw] at specific barycentric coordinates.
 # src[] = { barycoord }
-# FLAGS is enum bi_varying_name
-intrinsic("load_var_special_pan", src_comp=[2], dest_comp=0, bit_sizes=[32],
+# FLAGS is enum pan_bi_var_special_flags
+intrinsic("load_var_special_pan", src_comp=[1], dest_comp=0, bit_sizes=[32],
           indices=[FLAGS], flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # Panfrost-specific intrinsic to load the shader_output special-FAU value on 5th Gen.
@@ -1902,9 +1924,18 @@ system_value("fb_render_area_pan", 4, bit_sizes=[16])
 load("clear_value_pan", [], [IO_SEMANTICS, DEST_TYPE],
      [CAN_ELIMINATE, CAN_REORDER])
 
+# Frame argument parameter from the framebuffer descriptor
+system_value("frame_arg_pan", 1, bit_sizes=[64])
+
 # Cumulative coverage mask, the start of the atest/zt/blend chain
 system_value("cumulative_coverage_pan", 1, bit_sizes=[32])
 system_value("blend_descriptor_pan", 1, bit_sizes=[64], indices=[BASE])
+# Bundle of system values that v9+ architectures always package together
+# in a preloaded register:
+# 0 ..16: Rasterizer coverage bitmap
+# 16..24: Sample ID
+# 24..32: Centroid sample ID
+system_value("raster_sample_centroid_pan", 1, bit_sizes=[32])
 
 load("blend_input_pan", [], [IO_SEMANTICS, DEST_TYPE],
      [CAN_ELIMINATE, CAN_REORDER])
@@ -2879,7 +2910,7 @@ store("urb_vec4_intel", [1, 1, 1], [BASE])
 # add a constant offset ("base") to the total offset.
 #
 # src[] = { value, address }.
-store("urb_lsc_intel", [1], [BASE])
+store("urb_lsc_intel", [1], [BASE, ACCESS])
 
 # Load from indirect address delivered in the thread payloads in compute, mesh
 # & task shaders on Gfx12.5+
@@ -3240,6 +3271,9 @@ intrinsic("dma_st_pco", src_comp=[0], indices=[FLAGS], bit_sizes=[32])
 
 # dma_st_tiled_pco(address_data, valid_mask)
 intrinsic("dma_st_tiled_pco", src_comp=[3, 1], bit_sizes=[32])
+
+# dma_flush_pco(address)
+intrinsic("dma_flush_pco", src_comp=[2], dest_comp=1, bit_sizes=[32])
 
 # load_tiled_offset_pco(component, is_store)
 intrinsic("load_tiled_offset_pco", dest_comp=1, indices=[COMPONENT, FLAGS], bit_sizes=[32])

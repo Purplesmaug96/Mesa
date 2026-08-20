@@ -1955,6 +1955,14 @@ RadeonSI driver environment variables
    ``export_modifier``
       Export real modifier instead of DRM_FORMAT_MOD_INVALID to user. For example
       by eglExportDMABUFImageQueryMESA.
+   ``safe``
+      Disable basic optimizations.
+   ``safer``
+      Disable basic and medium optimizations.
+   ``safest``
+      Disable all optimizations.
+   ``ibcachesflush``
+      Flush all caches at the beginning of IBs.
 
 r600 driver environment variables
 ---------------------------------
@@ -2257,6 +2265,9 @@ PowerVR driver environment variables
 
    ``ra_skip_opt``
       Skip attempting to allocate temps with the optimal amount during RA.
+
+   ``no_dma_cache``
+      Disable DMA cache.
 
 .. envvar:: PCO_SKIP_PASSES
 

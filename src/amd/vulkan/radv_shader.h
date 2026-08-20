@@ -104,7 +104,6 @@ struct radv_shader_stage_key {
 
 struct radv_ps_epilog_key {
    uint32_t spi_shader_col_format;
-   uint32_t spi_shader_z_format;
 
    /* Bitmasks, each bit represents one of the 8 MRTs. */
    uint8_t color_is_int8;
@@ -116,14 +115,17 @@ struct radv_ps_epilog_key {
 
    uint32_t colors_written;
    uint8_t color_map[MAX_RTS];
-   bool mrt0_is_dual_src;
-   bool export_depth;
-   bool export_stencil;
-   bool export_sample_mask;
-   bool alpha_to_coverage_via_mrtz;
-   bool alpha_to_one;
-
-   uint16_t reserved;
+   uint8_t spi_shader_z_format : 4;
+   bool mrt0_is_dual_src : 1;
+   bool has_depth_output : 1;
+   bool has_stencil_output : 1;
+   bool has_sample_mask_output : 1;
+   bool ignore_depth_output : 1;
+   bool ignore_stencil_output : 1;
+   bool lower_1bit_sample_mask_to_discard : 1;
+   bool alpha_to_coverage_via_mrtz : 1;
+   bool alpha_to_one : 1;
+   uint32_t reserved : 19;
 };
 
 struct radv_spirv_to_nir_options {
@@ -172,7 +174,9 @@ struct radv_graphics_state_key {
    struct {
       bool sample_shading_enable : 1;
       bool max_sample_shading_enable : 1;
-      bool alpha_to_coverage_via_mrtz : 1; /* GFX11+ */
+      bool alpha_to_coverage_unknown : 1;
+      bool alpha_to_coverage_enable : 1;
+      bool alpha_to_one_enable : 1;
       uint8_t rasterization_samples;
       uint8_t ps_iter_samples; /* 0 if dynamic */
    } ms;
@@ -184,8 +188,10 @@ struct radv_graphics_state_key {
    struct {
       struct radv_ps_epilog_key epilog;
       bool force_vrs_enabled;
-      bool exports_mrtz_via_epilog;
-      bool has_epilog;
+      bool color_outputs_need_epilog;
+      bool depth_output_needs_epilog;
+      bool stencil_output_needs_epilog;
+      bool sample_mask_output_needs_epilog;
       bool mrt0_alpha_is_dead;
    } ps;
 };
@@ -375,6 +381,7 @@ struct radv_shader_part_binary {
    struct {
       uint32_t spi_shader_col_format;
       uint32_t cb_shader_mask;
+      uint32_t db_shader_control;
       uint32_t spi_shader_z_format;
    } info;
 
@@ -487,6 +494,7 @@ struct radv_shader_part {
    bool nontrivial_divisors;
    uint32_t spi_shader_col_format;
    uint32_t cb_shader_mask;
+   uint32_t db_shader_control;
    uint32_t spi_shader_z_format;
    uint32_t inst_pref_size;
    uint64_t upload_seq;

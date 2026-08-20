@@ -282,7 +282,11 @@ radv_optimize_nir_algebraic_early(nir_shader *nir)
 void
 radv_optimize_nir_algebraic_late(nir_shader *nir)
 {
-   NIR_PASS(_, nir, nir_opt_reassociate_for_fma);
+   /* Invariant position doesn't cover generic VS outputs used
+    * to compute position in later stages.
+    */
+   if (nir->info.stage != MESA_SHADER_VERTEX || nir->info.next_stage == MESA_SHADER_FRAGMENT)
+      NIR_PASS(_, nir, nir_opt_reassociate_for_fma);
 
    /* Do late algebraic optimization to turn add(a,
     * neg(b)) back into subs, then the mandatory cleanup
@@ -988,7 +992,7 @@ radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_shade
          BITSET_SET(nir->info.system_values_read, SYSTEM_VALUE_PRIMITIVE_ID);
 
    } else if (nir->info.stage == MESA_SHADER_VERTEX) {
-      num_vertices_per_prim = radv_get_num_vertices_per_prim(gfx_state);
+      num_vertices_per_prim = radv_get_num_vertices_per_prim(compiler_info->ac->gfx_level, gfx_state);
 
       /* Manually mark the instance ID used, so the shader can repack it. */
       if (gfx_state->vi.instance_rate_inputs)
@@ -1995,13 +1999,17 @@ radv_precompute_registers_hw_fs(struct radv_device *device, struct radv_shader *
    const bool disable_rbplus = pdev->info.has_rbplus && !pdev->info.rbplus_allowed;
 
    regs->ps.db_shader_control =
-      S_02880C_Z_EXPORT_ENABLE(info->ps.writes_z) | S_02880C_STENCIL_TEST_VAL_EXPORT_ENABLE(info->ps.writes_stencil) |
-      S_02880C_KILL_ENABLE(info->ps.can_discard) | S_02880C_MASK_EXPORT_ENABLE(mask_export_enable) |
-      S_02880C_CONSERVATIVE_Z_EXPORT(conservative_z_export) | S_02880C_Z_ORDER(z_order) |
-      S_02880C_DEPTH_BEFORE_SHADER(info->ps.early_fragment_test) |
+      S_02880C_KILL_ENABLE(info->ps.can_discard) | S_02880C_CONSERVATIVE_Z_EXPORT(conservative_z_export) |
+      S_02880C_Z_ORDER(z_order) | S_02880C_DEPTH_BEFORE_SHADER(info->ps.early_fragment_test) |
       S_02880C_PRE_SHADER_DEPTH_COVERAGE_ENABLE(info->ps.post_depth_coverage) |
       S_02880C_EXEC_ON_HIER_FAIL(info->ps.writes_memory) | S_02880C_EXEC_ON_NOOP(info->ps.writes_memory) |
       S_02880C_DUAL_QUAD_DISABLE(disable_rbplus) | S_02880C_PRIMITIVE_ORDERED_PIXEL_SHADER(info->ps.pops);
+
+   if (!info->ps.has_epilog) {
+      regs->ps.db_shader_control |= S_02880C_Z_EXPORT_ENABLE(info->ps.writes_z) |
+                                    S_02880C_STENCIL_TEST_VAL_EXPORT_ENABLE(info->ps.writes_stencil) |
+                                    S_02880C_MASK_EXPORT_ENABLE(mask_export_enable);
+   }
 
    if (pdev->info.gfx_level >= GFX12) {
       regs->ps.spi_ps_in_control = S_028640_PS_W32_EN(info->wave_size == 32);
@@ -2043,8 +2051,8 @@ radv_precompute_registers_hw_fs(struct radv_device *device, struct radv_shader *
          regs->ps.pa_sc_shader_control = S_028C40_LOAD_COLLISION_WAVEID(info->ps.pops);
    }
 
-   regs->ps.spi_shader_z_format = ac_get_spi_shader_z_format(info->ps.writes_z, info->ps.writes_stencil,
-                                                             info->ps.writes_sample_mask, info->ps.writes_mrt0_alpha);
+   regs->ps.spi_shader_z_format = ac_get_spi_shader_z_format(
+      info->ps.writes_z, info->ps.writes_stencil, info->ps.writes_sample_mask, info->ps.writes_mrt0_alpha_to_mrtz);
 }
 
 static void
@@ -3200,6 +3208,7 @@ radv_shader_part_create(struct radv_device *device, struct radv_shader_part_bina
 
    shader_part->spi_shader_col_format = binary->info.spi_shader_col_format;
    shader_part->cb_shader_mask = binary->info.cb_shader_mask;
+   shader_part->db_shader_control = binary->info.db_shader_control;
    shader_part->spi_shader_z_format = binary->info.spi_shader_z_format;
 
    if (pdev->info.gfx_level >= GFX11)
@@ -3758,6 +3767,11 @@ radv_create_ps_epilog(struct radv_device *device, const struct radv_ps_epilog_ke
 
    binary->info.spi_shader_col_format = key->spi_shader_col_format;
    binary->info.cb_shader_mask = ac_get_cb_shader_mask(key->spi_shader_col_format);
+   binary->info.db_shader_control =
+      S_02880C_Z_EXPORT_ENABLE(key->has_depth_output && !key->ignore_depth_output) |
+      S_02880C_STENCIL_TEST_VAL_EXPORT_ENABLE(key->has_stencil_output && !key->ignore_stencil_output) |
+      S_02880C_MASK_EXPORT_ENABLE(key->has_sample_mask_output && !key->lower_1bit_sample_mask_to_discard) |
+      S_02880C_KILL_ENABLE(key->lower_1bit_sample_mask_to_discard);
    binary->info.spi_shader_z_format = key->spi_shader_z_format;
 
    epilog = radv_shader_part_create(device, binary, info.wave_size);

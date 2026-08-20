@@ -129,6 +129,7 @@ anv_device_init_blorp(struct anv_device *device)
       .use_unrestricted_depth_range =
          device->vk.enabled_extensions.EXT_depth_range_unrestricted,
       .use_cached_dynamic_states = true,
+      .enable_tbimr = device->physical->instance->drirc.debug.tbimr,
    };
 
    blorp_init_brw(&device->blorp.context, device, &device->isl_dev,
@@ -136,7 +137,6 @@ anv_device_init_blorp(struct anv_device *device)
    device->blorp.context.get_fp64_nir = get_fp64_nir;
    device->blorp.context.lookup_shader = lookup_blorp_shader;
    device->blorp.context.upload_shader = upload_blorp_shader;
-   device->blorp.context.enable_tbimr = device->physical->instance->drirc.debug.tbimr;
    device->blorp.context.get_surface_address = blorp_get_surface_address;
    device->blorp.context.exec = anv_genX(device->info, blorp_exec);
    device->blorp.context.upload_dynamic_state = upload_dynamic_state;
@@ -1417,19 +1417,9 @@ void anv_CmdFillMemoryKHR(
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
 
-   /* From the Vulkan spec:
-    *
-    *    "size is the number of bytes to fill, and must be either a multiple
-    *    of 4, or VK_WHOLE_SIZE to fill the range from offset to the end of
-    *    the buffer. If VK_WHOLE_SIZE is used and the remaining size of the
-    *    buffer is not a multiple of 4, then the nearest smaller multiple is
-    *    used."
-    */
-   const VkDeviceSize size = pDstRange->size & ~3ull;
-
    anv_cmd_buffer_fill_area(cmd_buffer,
                             anv_address_from_range_flags(*pDstRange, dstFlags),
-                            size, data);
+                            pDstRange->size, data);
 
    anv_add_buffer_write_pending_bits(cmd_buffer, "after fill buffer");
 

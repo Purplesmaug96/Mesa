@@ -300,7 +300,7 @@ enum anv_bo_alloc_flags {
    /** Specifies that the BO may be shared externally */
    ANV_BO_ALLOC_EXTERNAL =                (1 << 1),
 
-   /** Specifies that the BO should be mapped */
+   /** Specifies that the BO should be mapped, only set internally in the driver */
    ANV_BO_ALLOC_MAPPED =                  (1 << 2),
 
    /** Specifies that the BO should be coherent.
@@ -2901,12 +2901,6 @@ anv_get_first_render_queue_index(struct anv_physical_device *pdevice)
 }
 
 static inline struct anv_state_pool *
-anv_device_get_general_state_pool(struct anv_device *device)
-{
-   return &device->general_state_pool;
-}
-
-static inline struct anv_state_pool *
 anv_device_get_aux_tt_pool(struct anv_device *device)
 {
    return &device->aux_tt_pool;
@@ -4498,7 +4492,6 @@ struct anv_simple_shader {
    struct anv_cmd_buffer *cmd_buffer;
    /* State stream used for various internal allocations */
    struct anv_state_stream *dynamic_state_stream;
-   struct anv_state_stream *general_state_stream;
    /* Where to emit the commands (can be different from cmd_buffer->batch) */
    struct anv_batch *batch;
    /* Shader to use */
@@ -5009,7 +5002,6 @@ struct anv_cmd_buffer {
    /* Stream objects for storing temporary data */
    struct anv_state_stream                      surface_state_stream;
    struct anv_state_stream                      dynamic_state_stream;
-   struct anv_state_stream                      general_state_stream;
    struct anv_state_stream                      indirect_push_descriptor_stream;
    struct anv_state_stream                      push_descriptor_buffer_stream;
 
@@ -5295,9 +5287,6 @@ anv_cmd_buffer_alloc_surface_states(struct anv_cmd_buffer *cmd_buffer,
                                     uint32_t count);
 struct anv_state
 anv_cmd_buffer_alloc_dynamic_state(struct anv_cmd_buffer *cmd_buffer,
-                                   uint32_t size, uint32_t alignment);
-struct anv_state
-anv_cmd_buffer_alloc_general_state(struct anv_cmd_buffer *cmd_buffer,
                                    uint32_t size, uint32_t alignment);
 static inline struct anv_state
 anv_cmd_buffer_alloc_temporary_state(struct anv_cmd_buffer *cmd_buffer,
@@ -6941,6 +6930,9 @@ enum anv_vid_mem_h265_types {
    ANV_VID_MEM_H265_SAO_TILE_COLUMN,
    ANV_VID_MEM_H265_DEC_MAX,
    ANV_VID_MEM_H265_SSE_SRC_PIX_ROW_STORE = ANV_VID_MEM_H265_DEC_MAX,
+   ANV_VID_MEM_H265_PAK_STREAMOUT,
+   ANV_VID_MEM_H265_SAO_STREAMOUT,
+   ANV_VID_MEM_H265_VDENC_INTRA_ROW_STORE,
    ANV_VID_MEM_H265_ENC_MAX,
 };
 
@@ -7003,6 +6995,8 @@ enum anv_vid_mem_av1_types {
    ANV_VID_MEM_AV1_CDF_DEFAULTS_2,
    ANV_VID_MEM_AV1_CDF_DEFAULTS_3,
    ANV_VID_MEM_AV1_DBD_BUFFER,
+   ANV_VID_MEM_AV1_TILE_SIZE_STREAMOUT,
+   ANV_VID_MEM_AV1_ENCODE_TILE_BITSTREAM_ACCUM,
    ANV_VID_MEM_AV1_MAX,
 };
 
@@ -7246,7 +7240,6 @@ struct anv_utrace_submit {
 
    /* Stream for temporary allocations */
    struct anv_state_stream dynamic_state_stream;
-   struct anv_state_stream general_state_stream;
 
    /* Last fully read 64bit timestamp (used to rebuild the upper bits of 32bit
     * timestamps), the timestamp is not scaled to the CPU time domain.

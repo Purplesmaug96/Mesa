@@ -194,11 +194,9 @@ radv_CreateVideoSessionKHR(VkDevice _device, const VkVideoSessionCreateInfoKHR *
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
    struct radv_video_session *vid =
-      vk_alloc2(&device->vk.alloc, pAllocator, sizeof(*vid), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      vk_zalloc2(&device->vk.alloc, pAllocator, sizeof(*vid), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!vid)
       return vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
-
-   memset(vid, 0, sizeof(struct radv_video_session));
 
    VkResult result = vk_video_session_init(&device->vk, &vid->vk, pCreateInfo);
    if (result != VK_SUCCESS) {
@@ -1616,9 +1614,9 @@ get_av1_param(struct radv_video_session *vid, struct vk_video_session_parameters
       av1->quantization.delta_q_v_dc = pi->pQuantization->DeltaQVDc;
       av1->quantization.delta_q_v_ac = pi->pQuantization->DeltaQVAc;
       if (pi->pQuantization->flags.using_qmatrix) {
-         av1->quantization.qm_y = pi->pQuantization->qm_y | 0xf0;
-         av1->quantization.qm_u = pi->pQuantization->qm_u | 0xf0;
-         av1->quantization.qm_v = pi->pQuantization->qm_v | 0xf0;
+         av1->quantization.qm_y = pi->pQuantization->qm_y;
+         av1->quantization.qm_u = pi->pQuantization->qm_u;
+         av1->quantization.qm_v = pi->pQuantization->qm_v;
       } else {
          av1->quantization.qm_y = 0xff;
          av1->quantization.qm_u = 0xff;
@@ -1686,17 +1684,19 @@ get_av1_param(struct radv_video_session *vid, struct vk_video_session_parameters
    }
 
    if (pi->pTileInfo) {
+      const unsigned sb_shift = seq_hdr->flags.use_128x128_superblock ? 5 : 4;
       av1->tile_info.tile_cols = pi->pTileInfo->TileCols;
       av1->tile_info.tile_rows = pi->pTileInfo->TileRows;
       av1->tile_info.context_update_tile_id = pi->pTileInfo->context_update_tile_id;
-      for (unsigned i = 0; i < AV1_MAX_TILE_COLS + 1; ++i) {
-         const unsigned sb_shift = seq_hdr->flags.use_128x128_superblock ? 5 : 4;
+      for (unsigned i = 0; i < pi->pTileInfo->TileCols; ++i) {
          av1->tile_info.tile_col_start_sb[i] = pi->pTileInfo->pMiColStarts[i] >> sb_shift;
-         av1->tile_info.tile_row_start_sb[i] = pi->pTileInfo->pMiRowStarts[i] >> sb_shift;
+         av1->tile_info.width_in_sbs[i] = pi->pTileInfo->pWidthInSbsMinus1[i];
       }
-      memcpy(av1->tile_info.width_in_sbs, pi->pTileInfo->pWidthInSbsMinus1, sizeof(av1->tile_info.width_in_sbs));
-      memcpy(av1->tile_info.height_in_sbs, pi->pTileInfo->pHeightInSbsMinus1, sizeof(av1->tile_info.height_in_sbs));
-      for (unsigned i = 0; i < AV1_MAX_NUM_TILES; ++i) {
+      for (unsigned i = 0; i < pi->pTileInfo->TileRows; ++i) {
+         av1->tile_info.tile_row_start_sb[i] = pi->pTileInfo->pMiRowStarts[i] >> sb_shift;
+         av1->tile_info.height_in_sbs[i] = pi->pTileInfo->pHeightInSbsMinus1[i];
+      }
+      for (unsigned i = 0; i < MIN2(av1_pic_info->tileCount, AV1_MAX_NUM_TILES); ++i) {
          av1->tile_info.tile_offset[i] = av1_pic_info->pTileOffsets[i];
          av1->tile_info.tile_size[i] = av1_pic_info->pTileSizes[i];
       }
