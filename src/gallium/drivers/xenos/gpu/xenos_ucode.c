@@ -17,6 +17,14 @@ uint32_t xe_ucode_cf_exec(uint32_t out[2], uint32_t address, uint32_t count,
     return 2;
 }
 
+void xe_ucode_cf_emit_pair(uint32_t out[3], uint32_t cf0_w0, uint32_t cf0_w1,
+                           uint32_t cf1_w0, uint32_t cf1_w1)
+{
+    out[0] = cf0_w0;
+    out[1] = (cf0_w1 & 0xFFFF) | (cf1_w0 << 16);
+    out[2] = (cf1_w0 >> 16) | (cf1_w1 << 16);
+}
+
 uint32_t xe_ucode_vfetch(uint32_t out[3], uint32_t fetch_const,
                          uint32_t dst_reg, uint32_t dst_swiz,
                          uint32_t src_reg, uint32_t src_swiz,
@@ -93,20 +101,23 @@ uint32_t xe_ucode_alu_build(uint32_t out[3], const xe_ucode_alu *a)
     return 3;
 }
 
-uint32_t xe_ucode_build_vs_minimal(uint32_t out[8])
+uint32_t xe_ucode_build_vs_minimal(uint32_t out[9])
 {
-    uint32_t i = 0;
+    uint32_t cf[2];
     xe_ucode_alu alu;
 
-    /* CF exec: 2 slots (vfetch + alu); sequence: slot0 = fetch, slot1 = ALU. */
-    i += xe_ucode_cf_exec(&out[i], 0, 2, 0b10, XE_UCODE_CF_EXEC);
+    /* CF region: 1 pair (3 dwords) = {NOP, exec}.  exec address = 1 (slots
+     * start at dword 3), count = 2 slots, sequence: slot0 = fetch (bit0 = 1),
+     * slot1 = ALU (bit0 = 0) -> 0b0001. */
+    xe_ucode_cf_exec(cf, 1, 2, 0b0001, XE_UCODE_CF_EXEC_END);
+    xe_ucode_cf_emit_pair(out, 0, 0, cf[0], cf[1]);
 
     /* vfetch_full const0 -> r0.xyzw, vertex index from r0.x (auto-injected
      * by the sequencer at VS entry), 4x float32, stride 16 bytes. */
-    i += xe_ucode_vfetch(&out[i], 0, 0, XE_UCODE_DST_SWIZ_XYZW,
-                         0, 0 /* r0.x */,
-                         XE_UCODE_FORMAT_32_32_32_32_FLOAT,
-                         4 /* dword stride */, 0, true, true);
+    xe_ucode_vfetch(&out[3], 0, 0, XE_UCODE_DST_SWIZ_XYZW,
+                    0, 0 /* r0.x */,
+                    XE_UCODE_FORMAT_32_32_32_32_FLOAT,
+                    4 /* dword stride */, 0, true, true);
 
     /* max r0.xyzw, r0, r0  ->  position = fetched vertex; export to
      * kVSPosition (62).  Scalar slot is the default nop. */
@@ -133,18 +144,19 @@ uint32_t xe_ucode_build_vs_minimal(uint32_t out[8])
     alu.vector_clamp = false;
     alu.scalar_clamp = false;
     alu.abs_constants = false;
-    i += xe_ucode_alu_build(&out[i], &alu);
+    xe_ucode_alu_build(&out[6], &alu);
 
-    return i;
+    return 9;
 }
 
-uint32_t xe_ucode_build_ps_minimal(uint32_t out[5])
+uint32_t xe_ucode_build_ps_minimal(uint32_t out[6])
 {
-    uint32_t i = 0;
+    uint32_t cf[2];
     xe_ucode_alu alu;
 
-    /* CF exec: 1 ALU slot. */
-    i += xe_ucode_cf_exec(&out[i], 0, 1, 0, XE_UCODE_CF_EXEC);
+    /* CF region: 1 pair = {NOP, exec_end}, address 1, 1 ALU slot. */
+    xe_ucode_cf_exec(cf, 1, 1, 0, XE_UCODE_CF_EXEC_END);
+    xe_ucode_cf_emit_pair(out, 0, 0, cf[0], cf[1]);
 
     /* max c48.xyzw, c48, c48  ->  oC0 = c48; export to kPSColor0 (0).
      * c48 = SHADER_CONSTANT_000_X index 48, written by the caller. */
@@ -171,7 +183,7 @@ uint32_t xe_ucode_build_ps_minimal(uint32_t out[5])
     alu.vector_clamp = false;
     alu.scalar_clamp = false;
     alu.abs_constants = false;
-    i += xe_ucode_alu_build(&out[i], &alu);
+    xe_ucode_alu_build(&out[3], &alu);
 
-    return i;
+    return 6;
 }

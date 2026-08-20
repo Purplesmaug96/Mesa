@@ -302,7 +302,7 @@ static void xe_triangle_fetch_constant(xenos_cmdbuf *cb)
 
 static void xe_triangle_shaders(xenos_cmdbuf *cb)
 {
-    uint32_t vs[8], ps[5];
+    uint32_t vs[9], ps[6];
     uint32_t vs_dwords = xe_ucode_build_vs_minimal(vs);
     uint32_t ps_dwords = xe_ucode_build_ps_minimal(ps);
 
