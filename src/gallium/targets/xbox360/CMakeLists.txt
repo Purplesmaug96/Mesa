@@ -13,10 +13,22 @@
 
 option(MESA_OP_XBOX360_XENOS "xbox360: use the xenos hardware (PM4) driver instead of softpipe" OFF)
 
+# The dev/PM4 hooks (gpu/xenos_gpu.c, gpu/xenos_ucode.c) and the NIR->microcode
+# compiler (xenos_shader.c) are always available to samples as part of the
+# merged lib, even when the GL screen is softpipe.  When the xenos driver IS
+# the screen (MESA_OP_XBOX360_XENOS), libxenos.a supplies them instead, so
+# keep them out of xbox360_core to avoid duplicate object names in the merged
+# archive.
+set(_x360_xenos_src "${CMAKE_SOURCE_DIR}/src/gallium/drivers/xenos")
+set(_x360_core_extra
+  $<$<NOT:$<BOOL:${MESA_OP_XBOX360_XENOS}>>:${_x360_xenos_src}/gpu/xenos_gpu.c>
+  $<$<NOT:$<BOOL:${MESA_OP_XBOX360_XENOS}>>:${_x360_xenos_src}/gpu/xenos_ucode.c>
+  $<$<NOT:$<BOOL:${MESA_OP_XBOX360_XENOS}>>:${_x360_xenos_src}/xenos_shader.c>)
 add_library(xbox360 STATIC
   xbox360_api.c xbox360_api.h xbox360_screen.h
   $<$<BOOL:${MESA_OP_XBOX360_XENOS}>:xenos/xbox360_xenos.c>
-  $<$<NOT:$<BOOL:${MESA_OP_XBOX360_XENOS}>>:softpipe/xbox360_softpipe.c>)
+  $<$<NOT:$<BOOL:${MESA_OP_XBOX360_XENOS}>>:softpipe/xbox360_softpipe.c>
+  ${_x360_core_extra})
 set_target_properties(xbox360 PROPERTIES
   OUTPUT_NAME xbox360_core
   C_VISIBILITY_PRESET hidden)
@@ -24,10 +36,10 @@ target_include_directories(xbox360 PRIVATE
   "${inc_include}" "${inc_src}" "${inc_mesa}"
   "${inc_gallium}" "${inc_gallium_aux}" "${inc_util}"
   "${inc_gallium_drivers}" "${inc_gallium_winsys}" "${inc_gallium_winsys_sw}"
-  "${CMAKE_SOURCE_DIR}/src/mesa/glapi")
-if(MESA_OP_XBOX360_XENOS)
-  target_include_directories(xbox360 PRIVATE
-    "${CMAKE_SOURCE_DIR}/src/gallium/drivers/xenos")
+  "${CMAKE_SOURCE_DIR}/src/mesa/glapi"
+  "${CMAKE_SOURCE_DIR}/src/gallium/drivers/xenos")
+if(DEFINED XECHAIN_SYSROOT AND XECHAIN_SYSROOT)
+  target_include_directories(xbox360 PRIVATE "${XECHAIN_SYSROOT}/include")
 endif()
 
 # Static link ring: mesa, gallium, softpipe, glapi and the supporting
@@ -63,7 +75,7 @@ endif()
 
 target_link_libraries(xbox360 PRIVATE
   -Wl,--start-group ${_x360_ring} -Wl,--end-group
-  ${dep_thread} ${dep_m} ${dep_dl} idep_mesautil)
+  ${dep_thread} ${dep_m} ${dep_dl} idep_mesautil idep_nir idep_nir_headers)
 
 # The samples link a single libxbox360.a, so the final archive must contain
 # the whole GL stack: merge every archive in the ring into the output archive
@@ -115,6 +127,8 @@ add_dependencies(xbox360 ${_x360_ring_targets})
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libxbox360.a" DESTINATION "${libdir}")
 install(FILES xbox360_api.h DESTINATION include/xbox360)
 install(FILES "${CMAKE_SOURCE_DIR}/src/gallium/drivers/xenos/gpu/xenos_gpu.h"
+              "${CMAKE_SOURCE_DIR}/src/gallium/drivers/xenos/gpu/xenos_regs.h"
+              "${CMAKE_SOURCE_DIR}/src/gallium/drivers/xenos/gpu/xenos_pm4.h"
   DESTINATION include/xbox360)
 
 # Real GL entry points (glClear, glBegin, ...) for the legacy API.

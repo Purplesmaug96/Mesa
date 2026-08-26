@@ -74,4 +74,18 @@ int xe_gpu_dev_verify(uint32_t ring_va, uint32_t size_log2,
 int xe_gpu_dev_triangle(uint32_t ring_va, uint32_t size_log2,
                         uint32_t start_wptr);
 
+/* Dev triangle through the NIR->microcode compiler (xenos_compile_nir):
+ * builds a VS (fetch POS, export position) and FS (constant colour from
+ * uniform const 0) with nir_builder, uploads the compiled ucode via
+ * PM4_IM_LOAD_IMMEDIATE, draws into EDRAM tile 0, then resolves the render
+ * target (RB_MODECONTROL kCopy + RB_COPY_*) into a tiled system-memory
+ * buffer and unswizzles it into the linear front buffer at (0,0).  The
+ * caller presents afterwards (VdSwap).  front_va must be the front buffer's
+ * guest virtual address (screen.xenia_fb_address).  On success *wptr_out is
+ * set to the free-running ring write pointer to continue the present loop
+ * from (so the CP never re-executes stale command data).  Returns 0. */
+int xe_gpu_dev_triangle_nir(uint32_t ring_va, uint32_t size_log2,
+                            uint32_t start_wptr, uint32_t front_va,
+                            uint32_t *wptr_out, int skip_resolve);
+
 #endif /* XENOS_GPU_H */

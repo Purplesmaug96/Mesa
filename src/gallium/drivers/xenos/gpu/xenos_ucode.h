@@ -37,9 +37,13 @@
  * kX=0, kY=1, kZ=2, kW=3, k0=4, k1=5, kKeep=7).  Pass-through .xyzw: */
 #define XE_UCODE_DST_SWIZ_XYZW 0x688u /* 3<<9 | 2<<6 | 1<<3 | 0 */
 
-/* ALU source swizzle: 2 bits per component, component-relative.
- * Pass-through .xyzw: */
-#define XE_UCODE_ALU_SWIZ_XYZW 0xE4u /* 3<<6 | 2<<4 | 1<<2 | 0 */
+/* ALU source swizzle: 2 bits per component, COMPONENT-RELATIVE (per xenia
+ * ucode.h: absolute component i = (rel_i + i) & 3).
+ * Pass-through .xyzw is therefore all-zero: */
+#define XE_UCODE_ALU_SWIZ_XYZW 0x00u
+/* Splat of component x to all lanes (relative encoding). */
+#define XE_UCODE_ALU_SWIZ_SPLAT_X \
+    (0u | (3u << 2) | (2u << 4) | (1u << 6))
 
 /* AluVectorOpcode (ucode.h): add=0, mul=1, max=2, min=3, frc=8, floor=10,
  * mad=11, dp4=15, dp3=16, dp2add=17, cube=18, max4=19. */

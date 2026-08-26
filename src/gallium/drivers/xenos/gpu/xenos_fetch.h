@@ -37,10 +37,11 @@ static inline void xe_gpu_vfetch_build(xenos_vertex_fetch *v,
                                        uint32_t size_bytes,
                                        uint32_t endian)
 {
-    v->type = XE_FETCH_TYPE_VERTEX;
-    v->address = guest_phys >> 2;
-    v->endian = endian & 0x3;
-    v->size = (size_bytes >> 2) & 0xFFFFFF;
+    /* Explicit LE shifts: the union's bitfields are host-endian dependent,
+     * but the guest is BE and xenia expects LE register values (it does
+     * ReadAndSwap).  Build the dwords with LE layout directly. */
+    v->dw[0] = (XE_FETCH_TYPE_VERTEX & 0x3) | ((guest_phys >> 2) << 2);
+    v->dw[1] = (endian & 0x3) | (((size_bytes >> 2) & 0xFFFFFF) << 2);
 }
 
 #define XE_GPU_TFETCH_SUBRESOURCE_ALIGN_LOG2 12u

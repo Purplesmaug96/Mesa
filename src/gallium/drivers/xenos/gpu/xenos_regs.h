@@ -61,6 +61,15 @@
 #define XE_REG_RB_COLOR_INFO    0x2001u
 #define XE_REG_RB_DEPTH_INFO    0x2002u
 
+/* EDRAM copy/resolve (register_table.inc: 0x2318-0x231F) */
+#define XE_REG_RB_COPY_CONTROL    0x2318u
+#define XE_REG_RB_COPY_DEST_BASE  0x2319u
+#define XE_REG_RB_COPY_DEST_PITCH 0x231Au
+#define XE_REG_RB_COPY_DEST_INFO  0x231Bu
+#define XE_REG_RB_DEPTH_CLEAR     0x231Du
+#define XE_REG_RB_COLOR_CLEAR     0x231Eu
+#define XE_REG_RB_COLOR_CLEAR_LO  0x231Fu
+
 /* SHADER_CONSTANT_000_X: 4 dwords per float4 constant, index c -> 0x4000+c*4 */
 #define XE_REG_SHADER_CONST(c)      (0x4000u + (uint32_t)(c) * 4u)
 /* SHADER_CONSTANT_FETCH: 6 dwords per fetch const, index i -> 0x4800+i*6 */
@@ -130,12 +139,13 @@ typedef union xenos_rb_depth_info {
     uint32_t value;
 } xenos_rb_depth_info;
 
-/* RB_MODECONTROL: edram_mode (xenos EdramMode) — kColorDepth = 4 */
+/* RB_MODECONTROL: edram_mode (xenos EdramMode). Values verified against
+ * xenia's xenos.h (Triang3l's hardware research): kNoOperation = 0,
+ * kColorDepth = 4, kDepthOnly = 5, kCopy = 6. Modes 1-3 are undefined. */
 #define XE_EDRAM_MODE_NO_OPERATION 0u
-#define XE_EDRAM_MODE_COPY         1u
-#define XE_EDRAM_MODE_RESOLVE      2u
-#define XE_EDRAM_MODE_DEPTH_ONLY   3u
 #define XE_EDRAM_MODE_COLOR_DEPTH  4u
+#define XE_EDRAM_MODE_DEPTH_ONLY   5u
+#define XE_EDRAM_MODE_COPY         6u
 
 /* xenos ColorRenderTargetFormat: k_8_8_8_8 = 0 */
 #define XE_COLOR_FORMAT_8_8_8_8      0u

@@ -93,21 +93,31 @@ xe_def(struct xe_cctx *c, nir_def *def)
    return NULL;
 }
 
+/* Compose a NIR absolute swizzle over an operand whose stored swizzle is in
+ * xenia's component-relative encoding (abs[i] = (rel[i] + i) & 3).
+ * abs'[i] = abs[s[i]] = (rel[s[i]] + s[i]) & 3
+ * rel'[i] = (abs'[i] - i) & 3 */
 static uint32_t
-xe_swiz_compose(uint32_t dst_swiz, uint32_t src_swiz)
+xe_swiz_compose(uint32_t outer_abs, uint32_t inner_rel)
 {
    uint32_t out = 0;
-   for (unsigned i = 0; i < 4; i++)
-      out |= ((src_swiz >> (2 * ((dst_swiz >> (2 * i)) & 3))) & 3) << (2 * i);
+   for (unsigned i = 0; i < 4; i++) {
+      unsigned s = (outer_abs >> (2 * i)) & 3;
+      unsigned abs_i = (((inner_rel >> (2 * s)) & 3) + s) & 3;
+      out |= ((abs_i + 4u - i) & 3u) << (2 * i);
+   }
    return out;
 }
 
-/* Splat an operand's component c to all 4 components (scalar defs). */
+/* Splat absolute component c to every lane, relative encoding:
+ * rel[i] = (c - i) & 3. */
 static uint32_t
-xe_swiz_splat(uint32_t swiz, uint32_t c)
+xe_swiz_splat(uint32_t c)
 {
-   uint32_t v = (swiz >> (2 * c)) & 3;
-   return v | (v << 2) | (v << 4) | (v << 6);
+   uint32_t v = 0;
+   for (unsigned i = 0; i < 4; i++)
+      v |= ((c + 4u - i) & 3u) << (2 * i);
+   return v;
 }
 
 static void
@@ -238,7 +248,10 @@ xe_emit_scalar_op(struct xe_cctx *c, uint32_t scalar_opc, uint32_t dst_gpr,
    uint32_t t = dst_gpr;
    for (unsigned i = 0; i < 4; i++) {
       xe_ucode_alu_src s = *src;
-      s.swiz = (s.swiz & 0x3Fu) | (((s.swiz >> (2 * i)) & 3) << 6);
+      /* Scalar unit reads the source through lane 3 of the swizzle:
+       * abs = (rel[3] + 3) & 3 -> rel[3] = (abs + 1) & 3. */
+      unsigned abs_i = (((s.swiz >> (2 * i)) & 3) + i) & 3;
+      s.swiz = (s.swiz & 0x3Fu) | (((abs_i + 1u) & 3u) << 6);
       xe_ucode_alu alu;
       memset(&alu, 0, sizeof(alu));
       alu.opc = XE_UCODE_ALU_MAX; /* vector part: nop-ish write to t */
@@ -569,7 +582,7 @@ xe_emit_alu_instr(struct xe_cctx *c, nir_alu_instr *alu)
       tmp = xe_alloc_temp(c);
       for (unsigned i = 0; i < ncomp; i++) {
          xe_ucode_alu_src v = s[i];
-         v.swiz = xe_swiz_splat(v.swiz, 0); /* scalar src: comp 0 */
+         v.swiz = xe_swiz_splat(v.swiz & 3u); /* scalar src: its comp 0 */
          xe_emit_mov(c, tmp, 1u << i, &v);
       }
       break;
@@ -593,7 +606,7 @@ xe_emit_alu_instr(struct xe_cctx *c, nir_alu_instr *alu)
    }
 
    if (alu->def.num_components == 1) {
-      result = (xe_ucode_alu_src){ true, tmp, xe_swiz_splat(0x00, 0), false };
+      result = (xe_ucode_alu_src){ true, tmp, xe_swiz_splat(0u), false };
    } else {
       result = (xe_ucode_alu_src){ true, tmp, XE_UCODE_ALU_SWIZ_XYZW, false };
    }
@@ -722,6 +735,15 @@ xenos_create_shader(struct pipe_screen *screen,
    }
 
    return shader;
+}
+
+struct xenos_shader *
+xenos_compile_nir(struct nir_shader *nir)
+{
+   if (!nir || (nir->info.stage != MESA_SHADER_VERTEX &&
+                nir->info.stage != MESA_SHADER_FRAGMENT))
+      return NULL;
+   return xenos_compile(nir);
 }
 
 void
