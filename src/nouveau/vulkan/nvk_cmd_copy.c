@@ -517,19 +517,19 @@ nvk_cmd_copy_memory_to_image_ce(struct nvk_cmd_buffer *cmd,
          nouveau_copy_rect(cmd, &copy2,
                            NV90B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED);
 
-      vk_foreach_struct_const(ext, region->pNext) {
-         switch (ext->sType) {
+      vk_foreach_struct_const(sType, ext, region->pNext) {
+         switch (sType) {
          default:
-            vk_debug_ignored_stype(ext->sType);
+            vk_debug_ignored_stype(sType);
             break;
          }
       }
    }
 
-   vk_foreach_struct_const(ext, pCopyMemoryInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pCopyMemoryInfo->pNext) {
+      switch (sType) {
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -642,19 +642,19 @@ nvk_cmd_copy_image_to_memory_ce(struct nvk_cmd_buffer *cmd,
          nouveau_copy_rect(cmd, &copy2,
                            NV90B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED);
 
-      vk_foreach_struct_const(ext, region->pNext) {
-         switch (ext->sType) {
+      vk_foreach_struct_const(sType, ext, region->pNext) {
+         switch (sType) {
          default:
-            vk_debug_ignored_stype(ext->sType);
+            vk_debug_ignored_stype(sType);
             break;
          }
       }
    }
 
-   vk_foreach_struct_const(ext, pCopyMemoryInfo->pNext) {
-      switch (ext->sType) {
+   vk_foreach_struct_const(sType, ext, pCopyMemoryInfo->pNext) {
+      switch (sType) {
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -948,16 +948,15 @@ nvk_cmd_fill_memory_ce(struct nvk_cmd_buffer *cmd,
 }
 
 VKAPI_ATTR void VKAPI_CALL
-nvk_CmdUpdateBuffer(VkCommandBuffer commandBuffer,
-                    VkBuffer dstBuffer,
-                    VkDeviceSize dstOffset,
-                    VkDeviceSize dataSize,
-                    const void *pData)
+nvk_CmdUpdateMemoryKHR(VkCommandBuffer commandBuffer,
+                       const VkDeviceAddressRangeKHR* pDstRange,
+                       VkAddressCommandFlagsKHR dstFlags,
+                       VkDeviceSize dataSize,
+                       const void *pData)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
-   VK_FROM_HANDLE(nvk_buffer, dst, dstBuffer);
 
-   uint64_t dst_addr = vk_buffer_address(&dst->vk, dstOffset);
+   uint64_t dst_addr = pDstRange->address;
    uint8_t subc = nvk_cmd_buffer_last_subchannel(cmd);
 
    /* From the Vulkan 1.4.354 spec:

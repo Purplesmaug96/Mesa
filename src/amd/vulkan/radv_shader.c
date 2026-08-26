@@ -762,29 +762,26 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
    NIR_PASS(_, nir, nir_lower_global_vars_to_local);
    NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
 
-   bool gfx7minus = compiler_info->ac->gfx_level <= GFX7;
-   bool use_llvm = compiler_info->key.use_llvm;
-
-   NIR_PASS(_, nir, nir_lower_subgroups,
-            &(struct nir_lower_subgroups_options){
-               .subgroup_size = nir->info.api_subgroup_size,
-               .ballot_bit_size = nir->info.api_subgroup_size,
-               .ballot_components = 1,
-               .lower_to_scalar = 1,
-               .lower_subgroup_masks = 1,
-               .lower_relative_shuffle = 1,
-               .lower_rotate_to_shuffle = use_llvm,
-               .lower_shuffle_to_32bit = 1,
-               .lower_vote_feq = 1,
-               .lower_vote_ieq = 1,
-               .lower_vote_bool_eq = 1,
-               .lower_quad_broadcast_dynamic = 1,
-               .lower_quad_broadcast_dynamic_to_const = gfx7minus,
-               .lower_shuffle_to_swizzle_amd = 1,
-               .lower_ballot_bit_count_to_mbcnt_amd = 1,
-               .lower_boolean_reduce = !use_llvm,
-               .lower_boolean_shuffle = true,
-            });
+   nir_lower_subgroups_options lower_subgroup_options = {
+      .subgroup_size = nir->info.api_subgroup_size,
+      .ballot_bit_size = nir->info.api_subgroup_size,
+      .ballot_components = 1,
+      .lower_to_scalar = 1,
+      .lower_subgroup_masks = 1,
+      .lower_relative_shuffle = 1,
+      .lower_rotate_to_shuffle = compiler_info->key.use_llvm,
+      .lower_shuffle_to_32bit = 1,
+      .lower_vote_feq = 1,
+      .lower_vote_ieq = 1,
+      .lower_vote_bool_eq = 1,
+      .lower_quad_broadcast_dynamic = 1,
+      .lower_quad_broadcast_dynamic_to_const = compiler_info->ac->gfx_level <= GFX7,
+      .lower_shuffle_to_swizzle_amd = 1,
+      .lower_ballot_bit_count_to_mbcnt_amd = 1,
+      .lower_boolean_reduce = !compiler_info->key.use_llvm,
+      .lower_boolean_shuffle = true,
+   };
+   NIR_PASS(_, nir, nir_lower_subgroups, &lower_subgroup_options);
 
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
    NIR_PASS(_, nir, nir_opt_shrink_stores, !compiler_info->key.disable_shrink_image_store);
@@ -849,7 +846,21 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
       if (nir->info.stage == MESA_SHADER_TASK || nir->info.stage == MESA_SHADER_MESH)
          var_modes |= nir_var_mem_task_payload;
 
-      NIR_PASS(_, nir, nir_opt_shared_vars_to_subgroup, 1, nir->info.max_subgroup_size);
+      nir_opt_shared_vars_to_subgroup_options shared_to_subgroup_options = {
+         .optimize_constant_access_to_uniform = true,
+         .optimize_divergent_access_to_shuffle = compiler_info->ac->gfx_level >= GFX8,
+         .linear_workgroup_ids = nir->info.derivative_group != DERIVATIVE_GROUP_QUADS,
+         .ballot_num_components = 1,
+         .ballot_size = nir->info.max_subgroup_size,
+      };
+
+      bool shared_to_subgroup = false;
+      NIR_PASS(shared_to_subgroup, nir, nir_opt_shared_vars_to_subgroup, &shared_to_subgroup_options);
+      if (shared_to_subgroup) {
+         NIR_PASS(_, nir, nir_opt_dead_write_vars);
+         NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_mem_shared, NULL);
+         NIR_PASS(_, nir, nir_lower_subgroups, &lower_subgroup_options);
+      }
 
       NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, var_modes, shared_var_info);
       NIR_PASS(_, nir, nir_lower_explicit_io, var_modes, nir_address_format_32bit_offset);
@@ -921,7 +932,8 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
 
 bool
 radv_consider_culling(const struct radv_compiler_info *compiler_info, struct nir_shader *nir, uint64_t ps_inputs_read,
-                      unsigned num_vertices_per_primitive, const struct radv_shader_info *info)
+                      unsigned num_vertices_per_primitive, const struct radv_shader_info *info,
+                      const struct radv_graphics_state_key *gfx_state)
 {
    /* Culling doesn't make sense for meta shaders. */
    if (is_meta_shader(nir))
@@ -950,6 +962,12 @@ radv_consider_culling(const struct radv_compiler_info *compiler_info, struct nir
     * then may be okay to keep the memory stores in the 1st shader part, and delete them from the 2nd.
     */
    if (nir->info.writes_memory)
+      return false;
+
+   /* NGG lowering exports 0 primitives and vertices with rasterizer discard. There's nothing
+    * to cull.
+    */
+   if (gfx_state->rs.rasterizer_discard)
       return false;
 
    /* When the shader relies on the subgroup invocation ID, we'd break it, because the ID changes after the culling.
@@ -1025,6 +1043,7 @@ radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_shade
    options.has_gs_primitives_query = compiler_info->ac->gfx_level < GFX11;
    options.force_vrs = info->force_vrs_per_vertex;
    options.skip_viewport_state_culling = nir->info.outputs_written & (VARYING_BIT_VIEWPORT | VARYING_BIT_VIEWPORT_MASK);
+   options.rasterizer_discard = gfx_state->rs.rasterizer_discard;
 
    if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_TESS_EVAL) {
       assert(info->is_ngg);

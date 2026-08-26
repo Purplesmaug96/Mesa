@@ -4482,8 +4482,8 @@ tu_BeginCommandBuffer(VkCommandBuffer commandBuffer,
       cmd_buffer->state.occlusion_query_may_be_running =
          pBeginInfo->pInheritanceInfo->occlusionQueryEnable;
 
-      vk_foreach_struct_const(ext, pBeginInfo->pInheritanceInfo) {
-         switch (ext->sType) {
+      vk_foreach_struct_const(sType, ext, pBeginInfo->pInheritanceInfo) {
+         switch (sType) {
          case VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_CONDITIONAL_RENDERING_INFO_EXT: {
             const VkCommandBufferInheritanceConditionalRenderingInfoEXT *cond_rend =
                (VkCommandBufferInheritanceConditionalRenderingInfoEXT *) ext;
@@ -9306,6 +9306,11 @@ tu_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
        * the vertexStride should also be in units of dwords.
        */
       vertexStride = vertexStride >> 2;
+   } else {
+      /* On a6xx only the offset is shifted right by 2, so scale it up to
+       * match the byte counter and stride.
+       */
+      counterOffset = counterOffset << 2;
    }
    tu_cs_emit(cs, instanceCount);
    tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, counterBufferOffset));

@@ -568,7 +568,7 @@ anv_state_pools_init(struct anv_device *device)
                                    &(struct anv_state_pool_params) {
                                       .name         = "binding table pool",
                                       .base_address = anv_physical_device_get_binding_table_pool_va(device->physical)->addr,
-                                      .block_size   = device->physical->instance->drirc.perf.bt_block_size,
+                                      .block_size   = device->physical->drirc.perf.bt_block_size,
                                       .max_size     = anv_physical_device_get_binding_table_pool_va(device->physical)->size,
                                    });
    } else {
@@ -1240,7 +1240,7 @@ VkResult anv_CreateDevice(
    if (result != VK_SUCCESS)
       goto fail_meta_device;
 
-   device->vk.disable_lto = device->physical->instance->drirc.debug.disable_lto;
+   device->vk.disable_lto = device->physical->drirc.debug.disable_lto;
 
    simple_mtx_init(&device->accel_struct_build.mutex, mtx_plain);
    simple_mtx_init(&device->fp64_mutex, mtx_plain);
@@ -1366,16 +1366,6 @@ void anv_DestroyDevice(
 
    /* Do TRTT batch garbage collection before destroying queues. */
    anv_device_finish_trtt(device);
-
-   if (device->accel_struct_build.radix_sort_64) {
-      radix_sort_vk_destroy(device->accel_struct_build.radix_sort_64,
-                            _device, &device->vk.alloc);
-   }
-
-   if (device->accel_struct_build.radix_sort_96) {
-      radix_sort_vk_destroy(device->accel_struct_build.radix_sort_96,
-                            _device, &device->vk.alloc);
-   }
 
    vk_meta_device_finish(&device->vk, &device->meta_device);
 
@@ -1670,11 +1660,11 @@ VkResult anv_AllocateMemory(
    const struct wsi_memory_allocate_info *wsi_info = NULL;
    uint64_t client_address = 0;
 
-   vk_foreach_struct_const(ext, pAllocateInfo->pNext) {
+   vk_foreach_struct_const(sType, ext, pAllocateInfo->pNext) {
       /* VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA isn't a real enum
        * value, so use cast to avoid compiler warn
        */
-      switch ((uint32_t)ext->sType) {
+      switch ((uint32_t)sType) {
       case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO:
       case VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID:
       case VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT:
@@ -1684,11 +1674,11 @@ VkResult anv_AllocateMemory(
          break;
 
       case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR:
-         fd_info = (void *)ext;
+         fd_info = ext;
          break;
 
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO:
-         dedicated_info = (void *)ext;
+         dedicated_info = ext;
          break;
 
       case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO: {
@@ -1699,11 +1689,11 @@ VkResult anv_AllocateMemory(
       }
 
       case VK_STRUCTURE_TYPE_WSI_MEMORY_ALLOCATE_INFO_MESA:
-         wsi_info = (void *)ext;
+         wsi_info = ext;
          break;
 
       default:
-         vk_debug_ignored_stype(ext->sType);
+         vk_debug_ignored_stype(sType);
          break;
       }
    }
@@ -1797,7 +1787,7 @@ VkResult anv_AllocateMemory(
           * consumer side relying on implicit fencing can have a fence to
           * wait for render complete.
           */
-         if (pdevice->instance->drirc.debug.external_memory_implicit_sync &&
+         if (pdevice->drirc.debug.external_memory_implicit_sync &&
              (image->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
             alloc_flags |= ANV_BO_ALLOC_IMPLICIT_WRITE;
       }

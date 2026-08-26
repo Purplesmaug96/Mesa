@@ -111,9 +111,12 @@ radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   /* Check if the GPU has SDMA support and transfer queues are allowed. */
+   /* Check if the GPU has SDMA support and transfer queues are allowed. The queue
+    * is exposed when the experimental flag is set or when a per-application drirc
+    * profile opts in (radv_enable_transfer_queue). */
    if (pdev->info.sdma_ip_version == SDMA_UNKNOWN || !pdev->info.ip[AMD_IP_SDMA].num_queues ||
-       !(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE))
+       (!(instance->experimental_flags & RADV_EXPERIMENTAL_TRANSFER_QUEUE) &&
+        !pdev->drirc.performance.enable_transfer_queue))
       return false;
 
    if (!radv_compute_queue_enabled(pdev))
@@ -3105,8 +3108,8 @@ radv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice, ui
    assert(*pCount <= 6);
 
    for (uint32_t i = 0; i < *pCount; i++) {
-      vk_foreach_struct (ext, pQueueFamilyProperties[i].pNext) {
-         switch (ext->sType) {
+      vk_foreach_struct (sType, ext, pQueueFamilyProperties[i].pNext) {
+         switch (sType) {
          case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES: {
             VkQueueFamilyGlobalPriorityProperties *prop = (VkQueueFamilyGlobalPriorityProperties *)ext;
 

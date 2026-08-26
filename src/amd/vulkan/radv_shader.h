@@ -167,6 +167,7 @@ struct radv_graphics_state_key {
    struct {
       uint32_t provoking_vtx_last : 1;
       uint32_t cull_mode : 2;
+      bool rasterizer_discard : 1;
       bool polygon_mode_unknown : 1;
       uint8_t polygon_mode : 2; /* VK_POLYGON_MODE_FILL/LINE_POINT */
    } rs;
@@ -266,6 +267,10 @@ struct radv_llvm_compiler_options {
 /* gap: bits 27:29 */
 #define PS_STATE_FRONT_FACE_SELECT__SHIFT 30 /* 0=sysval, 1=front, -1=back; sign-extended */
 #define PS_STATE_FRONT_FACE_SELECT__MASK  0x3
+
+/* For AC_UD_CS_STATE */
+#define CS_STATE_IS_COMPUTE_QUEUE__SHIFT 0
+#define CS_STATE_IS_COMPUTE_QUEUE__MASK  0x1
 
 struct radv_shader_layout {
    uint32_t num_sets;
@@ -573,8 +578,9 @@ struct radv_compiler_info {
       uint32_t lower_terminate_to_discard : 1;
       uint32_t no_implicit_varying_subgroup_size : 1;
       uint32_t force_nan_preserve_min_max : 1;
+      uint32_t enable_custom_border_on_compute_queue : 1;
       uint32_t nir_debug_info : 1;
-      uint32_t padding : 29;
+      uint32_t padding : 28;
 
       int32_t force_aniso;
 
@@ -808,7 +814,7 @@ void radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_
 
 bool radv_consider_culling(const struct radv_compiler_info *compiler_info, struct nir_shader *nir,
                            uint64_t ps_inputs_read, unsigned num_vertices_per_primitive,
-                           const struct radv_shader_info *info);
+                           const struct radv_shader_info *info, const struct radv_graphics_state_key *gfx_state);
 
 void radv_get_nir_options(struct radv_compiler_info *compiler_info);
 

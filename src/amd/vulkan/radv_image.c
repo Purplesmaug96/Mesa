@@ -372,10 +372,9 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
    assert(!(image->vk.usage & VK_IMAGE_USAGE_2_STORAGE_BIT_KHR));
 
    /* TODO:
-    * - Investigate about mips+layers.
     * - Enable on other gens.
     */
-   bool use_htile_for_mips = image->vk.array_layers == 1 && pdev->info.gfx_level >= GFX10;
+   bool use_htile_for_mips = pdev->info.gfx_level >= GFX10;
 
    if (pdev->info.has_htile_stencil_mipmap_bug && image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT &&
        image->vk.mip_levels > 1)
@@ -1447,8 +1446,11 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
    image->plane_count = vk_format_get_plane_count(format);
    image->disjoint = image->plane_count > 1 && image->vk.create_flags & VK_IMAGE_CREATE_2_DISJOINT_BIT_KHR;
 
-   image->exclusive = image->vk.sharing_mode == VK_SHARING_MODE_EXCLUSIVE;
-   if (image->vk.sharing_mode == VK_SHARING_MODE_CONCURRENT) {
+   image->exclusive =
+      image->vk.sharing_mode == VK_SHARING_MODE_EXCLUSIVE || pdev->drirc.performance.force_exclusive_image;
+
+   if (!image->exclusive) {
+      assert(image->vk.sharing_mode == VK_SHARING_MODE_CONCURRENT);
       for (uint32_t i = 0; i < pCreateInfo->queueFamilyIndexCount; ++i)
          if (pCreateInfo->pQueueFamilyIndices[i] == VK_QUEUE_FAMILY_EXTERNAL ||
              pCreateInfo->pQueueFamilyIndices[i] == VK_QUEUE_FAMILY_FOREIGN_EXT)
