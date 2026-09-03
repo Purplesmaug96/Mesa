@@ -58,6 +58,26 @@ xenos_resource_create(struct pipe_screen *screen,
    if (xs->ws->get_physical)
       res->gpu_addr = (uint32_t)(xs->ws->get_physical(xs->ws, res->data) >> 2);
 
+   /* Render targets draw into EDRAM tiles; the system memory above is only
+    * used for CPU access.  Give each target a tile range plus the tiled
+    * resolve backing VdSwap can sample after kCopy. */
+   if (templ->target != PIPE_BUFFER &&
+       (templ->bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL))) {
+      unsigned bpb = blocksize;
+      unsigned pitch_px = MAX2(1u, templ->width0);
+
+      res->has_edram = 1;
+      res->edram_pitch_tiles = (pitch_px * bpb + 2047u) / 2048u;
+      res->edram_rows = (templ->height0 + 7u) / 8u;
+      res->edram_base = xs->next_edram_tile;
+      xs->next_edram_tile += res->edram_pitch_tiles * res->edram_rows;
+
+      res->resolve_data = xs->ws->alloc(xs->ws, size, 12);
+      if (res->resolve_data && xs->ws->get_physical)
+         res->resolve_phys =
+            (uint32_t)(xs->ws->get_physical(xs->ws, res->resolve_data));
+   }
+
    return &res->base;
 }
 
@@ -70,6 +90,8 @@ xenos_resource_destroy(struct pipe_screen *screen,
 
    if (res->data)
       xs->ws->free(xs->ws, res->data);
+   if (res->resolve_data)
+      xs->ws->free(xs->ws, res->resolve_data);
    FREE(res);
 }
 

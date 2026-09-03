@@ -45,6 +45,7 @@ static const struct nir_shader_compiler_options xenos_compiler_options = {
    .lower_flrp64 = true,
    .lower_fmod = true,
    .lower_uniforms_to_ubo = true,
+   .io_options = nir_io_has_intrinsics,
    .lower_int64_options = nir_lower_imul_2x32_64,
    .max_unroll_iterations = 32,
    .support_indirect_inputs = (uint8_t)BITFIELD_MASK(MESA_SHADER_STAGES),
@@ -231,6 +232,96 @@ xenos_destroy_screen(struct pipe_screen *screen)
    FREE(screen);
 }
 
+/* ---- Optional screen hooks: st/mesa touches several of these during
+ * context teardown/flush even on minimal drivers - leaving them NULL
+ * crashes on first use.  Provide safe defaults. ---- */
+
+static int
+xenos_get_video_param(struct pipe_screen *screen,
+                      enum pipe_video_profile profile,
+                      enum pipe_video_entrypoint entrypoint,
+                      enum pipe_video_cap param)
+{
+   return 0;
+}
+
+static void
+xenos_get_sample_pixel_grid(struct pipe_screen *screen, unsigned sample_count,
+                            unsigned *out_width, unsigned *out_height)
+{
+   *out_width = 1;
+   *out_height = 1;
+}
+
+static bool
+xenos_can_create_resource(struct pipe_screen *screen,
+                          const struct pipe_resource *templ)
+{
+   return true;
+}
+
+static void
+xenos_fence_reference(struct pipe_screen *screen,
+                      struct pipe_fence_handle **dst,
+                      struct pipe_fence_handle *src)
+{
+   *dst = src;
+}
+
+static bool
+xenos_fence_finish(struct pipe_screen *screen, struct pipe_context *ctx,
+                   struct pipe_fence_handle *fence, uint64_t timeout)
+{
+   /* Fences are never emitted; anything queried is already complete. */
+   return true;
+}
+
+static int
+xenos_fence_get_fd(struct pipe_screen *screen, struct pipe_fence_handle *fence)
+{
+   return -1;
+}
+
+static int
+xenos_get_driver_query_info(struct pipe_screen *screen, unsigned index,
+                            struct pipe_driver_query_info *info)
+{
+   return 0;
+}
+
+static int
+xenos_get_driver_query_group_info(struct pipe_screen *screen, unsigned index,
+                                  struct pipe_driver_query_group_info *info)
+{
+   return 0;
+}
+
+static void
+xenos_query_memory_info(struct pipe_screen *screen,
+                        struct pipe_memory_info *info)
+{
+   memset(info, 0, sizeof(*info));
+}
+
+static void
+xenos_get_driver_uuid(struct pipe_screen *screen, char *uuid)
+{
+   memset(uuid, 0, PIPE_UUID_SIZE);
+}
+
+static void
+xenos_get_device_uuid(struct pipe_screen *screen, char *uuid)
+{
+   memset(uuid, 0, PIPE_UUID_SIZE);
+}
+
+static void
+xenos_set_damage_region(struct pipe_screen *screen,
+                        struct pipe_resource *res, unsigned nboxes,
+                        const struct pipe_box *boxes)
+{
+}
+
 static void
 xenos_flush_frontbuffer(struct pipe_screen *screen,
                         struct pipe_context *pipe,
@@ -267,6 +358,21 @@ xenos_screen_create(struct xenos_winsys *ws)
    screen->base.is_format_supported = xenos_is_format_supported;
    screen->base.context_create = xenos_create_context;
    screen->base.flush_frontbuffer = xenos_flush_frontbuffer;
+
+   /* Optional hooks that st/mesa may touch on any code path. */
+   screen->base.get_video_param = xenos_get_video_param;
+   screen->base.get_sample_pixel_grid = xenos_get_sample_pixel_grid;
+   screen->base.can_create_resource = xenos_can_create_resource;
+   screen->base.fence_reference = xenos_fence_reference;
+   screen->base.fence_finish = xenos_fence_finish;
+   screen->base.fence_get_fd = xenos_fence_get_fd;
+   screen->base.get_driver_query_info = xenos_get_driver_query_info;
+   screen->base.get_driver_query_group_info =
+      xenos_get_driver_query_group_info;
+   screen->base.query_memory_info = xenos_query_memory_info;
+   screen->base.get_driver_uuid = xenos_get_driver_uuid;
+   screen->base.get_device_uuid = xenos_get_device_uuid;
+   screen->base.set_damage_region = xenos_set_damage_region;
 
    for (unsigned i = 0; i < MESA_SHADER_STAGES; i++)
       screen->base.nir_options[i] = &xenos_compiler_options;

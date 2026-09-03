@@ -29,7 +29,10 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include <xecore/xboxkrnl.h>
 
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
@@ -40,6 +43,8 @@
 #include "gpu/xenos_ucode.h"
 #include "xenos_shader.h"
 #include "xenos_private.h"
+
+extern void DbgPrint(const char *fmt, ...);
 
 #define XE_MAX_UCODE_DWORDS 6144u /* 3 + 3*2047 slots */
 #define XE_MAX_SLOTS         ((XE_MAX_UCODE_DWORDS - 3) / 3)
@@ -485,6 +490,9 @@ xe_emit_intrinsic(struct xe_cctx *c, nir_intrinsic_instr *intr)
 
    case nir_intrinsic_load_deref: {
       nir_variable *var = nir_intrinsic_get_var(intr, 0);
+      DbgPrint("[VFDPROBE] load_deref var=%p mode=%x loc=%u",
+               (void *)var, var ? var->data.mode : 0,
+               var ? var->data.driver_location : 0);
       if (var && (var->data.mode & nir_var_uniform)) {
          xe_emit_uniform(c, &intr->def, var->data.driver_location);
          return;
@@ -508,6 +516,8 @@ xe_emit_intrinsic(struct xe_cctx *c, nir_intrinsic_instr *intr)
    fprintf(stderr, "xenos: %s: unsupported intrinsic #%u\n",
            c->stage == MESA_SHADER_VERTEX ? "VS" : "FS",
            (unsigned)intr->intrinsic);
+   DbgPrint("[VFDPROBE] stage=%d UNSUPPORTED intrinsic #%u",
+            (int)c->stage, (unsigned)intr->intrinsic);
    c->failed = true;
 }
 
@@ -618,16 +628,25 @@ xe_compile_block(struct xe_cctx *c, nir_block *block)
 {
    nir_foreach_instr (instr, block) {
       switch (instr->type) {
-      case nir_instr_type_intrinsic:
-         xe_emit_intrinsic(c, nir_instr_as_intrinsic(instr));
-         break;
       case nir_instr_type_alu:
+         DbgPrint("[VFDPROBE] stage=%d ALU op=%s hw=%d",
+                  (int)c->stage,
+                  nir_op_infos[nir_instr_as_alu(instr)->op].name,
+                  (int)nir_instr_as_alu(instr)->op);
          xe_emit_alu_instr(c, nir_instr_as_alu(instr));
+         break;
+      case nir_instr_type_intrinsic:
+         DbgPrint("[VFDPROBE] stage=%d INTR %s",
+                  (int)c->stage,
+                  nir_intrinsic_infos[nir_instr_as_intrinsic(instr)->intrinsic].name);
+         xe_emit_intrinsic(c, nir_instr_as_intrinsic(instr));
          break;
       case nir_instr_type_undef:
          xe_def_set(c, &nir_instr_as_undef(instr)->def, xe_op_zero);
          break;
       case nir_instr_type_phi:
+         DbgPrint("[VFDPROBE] stage=%d FAIL phi",
+                  (int)c->stage);
          fprintf(stderr, "xenos: %s: control flow not supported\n",
                  c->stage == MESA_SHADER_VERTEX ? "VS" : "FS");
          c->failed = true;
@@ -635,8 +654,11 @@ xe_compile_block(struct xe_cctx *c, nir_block *block)
       default:
          break; /* nop / jump / deref / parallel_copy: no code */
       }
-      if (c->failed)
+      if (c->failed) {
+         DbgPrint("[VFDPROBE] stage=%d FAILED after instr type=%d",
+                  (int)c->stage, (int)instr->type);
          return;
+      }
    }
 }
 
@@ -674,7 +696,13 @@ free(c.defs);
    }
 
    if (!c.failed) {
-      uint32_t total = 3 + 3 * c.num_slots;
+      /* Pre-calculate number of exec blocks for allocation. */
+      const uint32_t MAX_SLOTS_PER_BLOCK = 6;
+      uint32_t num_blocks = (c.num_slots + MAX_SLOTS_PER_BLOCK - 1)
+                            / MAX_SLOTS_PER_BLOCK;
+      if (num_blocks == 0)
+         num_blocks = 1;
+      uint32_t total = 3 * num_blocks + 3 * c.num_slots;
       shader = CALLOC_STRUCT(xenos_shader);
       if (shader) {
          shader->type = c.stage;
@@ -689,11 +717,40 @@ free(c.defs);
    }
 
    if (shader) {
-      uint32_t cf[2];
-      xe_ucode_cf_exec(cf, 1, c.num_slots, c.sequence, XE_UCODE_CF_EXEC_END);
-      xe_ucode_cf_emit_pair(shader->ucode, 0, 0, cf[0], cf[1]);
-      memcpy(shader->ucode + 3, c.ucode + 3, 3 * c.num_slots *
-             sizeof(uint32_t));
+      /* The CF exec instruction's count field is 3 bits (max 7) and the
+       * sequence field is 12 bits (6 slots × 2 bits each for fetch/serialize).
+       * Split into multiple exec blocks of max 6 slots each.  CF pairs go
+       * first, then all instruction slots. */
+      const uint32_t MAX_SLOTS_PER_BLOCK = 6;
+      uint32_t num_blocks = (c.num_slots + MAX_SLOTS_PER_BLOCK - 1)
+                            / MAX_SLOTS_PER_BLOCK;
+      if (num_blocks == 0)
+         num_blocks = 1;
+      /* The recorded vfetch slot dwords assumed the single-CF-pair layout
+       * (slots start at dword 3).  With multiple exec blocks the ISA slots
+       * start at 3*num_blocks, so shift every fixup by the extra CF-pair
+       * dwords.  Otherwise xenos_patch_vfetch would overwrite the later CF
+       * pair with vfetch data. */
+      if (num_blocks > 1) {
+         for (uint32_t f = 0; f < c.vfetch_count; ++f)
+            c.vfetch[f].ucode_dword += 3 * (num_blocks - 1);
+      }
+      uint32_t slot_index = 0;
+      for (uint32_t block = 0; block < num_blocks; block++) {
+         uint32_t block_count = MIN2(MAX_SLOTS_PER_BLOCK,
+                                     c.num_slots - slot_index);
+         uint32_t block_seq = (c.sequence >> (2 * slot_index)) & 0xFFF;
+         uint32_t opcode = (block == num_blocks - 1)
+                            ? XE_UCODE_CF_EXEC_END : XE_UCODE_CF_EXEC;
+         uint32_t cf[2];
+         xe_ucode_cf_exec(cf, num_blocks + slot_index,
+                          block_count, block_seq, opcode);
+         xe_ucode_cf_emit_pair(shader->ucode + block * 3,
+                               0, 0, cf[0], cf[1]);
+         slot_index += block_count;
+      }
+      memcpy(shader->ucode + 3 * num_blocks, c.ucode + 3,
+             3 * c.num_slots * sizeof(uint32_t));
       shader->num_gprs = c.max_gpr;
       shader->num_consts = c.num_consts;
       shader->num_inputs = util_bitcount(nir->info.inputs_read);
@@ -702,6 +759,20 @@ free(c.defs);
       memcpy(shader->vfetch, c.vfetch,
              c.vfetch_count * sizeof(*c.vfetch));
       shader->vfetch_count = c.vfetch_count;
+      /* TEMP DIAGNOSTIC: dump emitted ucode dwords for the large (multi-block)
+       * vertex shader, via DbgPrint so it reaches the host log.  One-shot. */
+      {
+         static int dump_once = 1;
+         if (c.stage == MESA_SHADER_VERTEX && num_blocks >= 2 && dump_once) {
+            dump_once = 0;
+            DbgPrint("[EMITDT] VS slots=%u blocks=%u ucode_dwords=%u",
+                     (unsigned)c.num_slots, (unsigned)num_blocks,
+                     (unsigned)shader->ucode_dwords);
+            for (unsigned di = 0; di < (unsigned)shader->ucode_dwords; di++) {
+               DbgPrint("[EMITDT] %3u: %08x", di, shader->ucode[di]);
+            }
+         }
+      }
    }
 
    free(c.defs);
@@ -725,7 +796,13 @@ xenos_create_shader(struct pipe_screen *screen,
        nir->info.stage != MESA_SHADER_FRAGMENT)
       return NULL;
 
+   NIR_PASS(_, nir, nir_opt_constant_folding);
+   NIR_PASS(_, nir, nir_opt_deref);
+   NIR_PASS(_, nir, nir_opt_dce);
+
    struct xenos_shader *shader = xenos_compile(nir);
+   DbgPrint("[VFDPROBE] create_shader stage=%d irtype=%d -> shader=%p",
+            (int)nir->info.stage, (int)state->type, (void *)shader);
    if (shader) {
       fprintf(stderr, "xenos: compiled %s (%u inputs, %u outputs, %u slots, "
               "%u gprs, %u consts)\n",
@@ -743,7 +820,11 @@ xenos_compile_nir(struct nir_shader *nir)
    if (!nir || (nir->info.stage != MESA_SHADER_VERTEX &&
                 nir->info.stage != MESA_SHADER_FRAGMENT))
       return NULL;
-   return xenos_compile(nir);
+   DbgPrint("xenos: compile_nir stage=%d", (int)nir->info.stage);
+   struct xenos_shader *sh = xenos_compile(nir);
+   DbgPrint("xenos: compile_nir done sh=%p slots=%u fail=%d", sh,
+            sh ? sh->num_slots : 0, sh ? 0 : 1);
+   return sh;
 }
 
 void

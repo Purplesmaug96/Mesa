@@ -26,13 +26,19 @@ extern "C" {
 
 struct xbox360_display;
 
-/** A rendered frame, mapped directly from the softpipe deep framebuffer. */
+/** A rendered frame.  With the hardware (xenos) backend the GPU resolves
+ * into a tiled surface and it is presented through the swap texture; with
+ * softpipe \p ptr is a CPU-mapped linear image to blit manually. */
 struct xbox360_frame
 {
-   void *ptr;      /**< BGRA8 pixels, row 0 = top scanline of the image */
+   void *ptr;      /**< BGRA8 pixels (softpipe), NULL for the GPU path */
    uint32_t width;  /**< surface width in pixels */
    uint32_t height; /**< surface height in pixels */
-   uint32_t stride; /**< byte stride between rows */
+   uint32_t stride; /**< byte stride between rows (softpipe) */
+
+   /* GPU path: tiled resolve destination for VdSwap's swap texture. */
+   bool gpu_tiled;
+   uint32_t gpu_phys;
 };
 
 /**
@@ -68,6 +74,18 @@ void xbox360_present(struct xbox360_display *d, struct xbox360_frame *frame);
  * Release all resources of a display.
  */
 void xbox360_destroy(struct xbox360_display *d);
+
+/**
+ * Attach the shared primary GPU ring (screen.c's VD ring) to the hardware
+ * driver.  Must be called after screen_init() and before the first GL draw
+ * when running against the xenos backend.  \p wptr_slot is the shared
+ * free-running write pointer; \p rptr_page the CP read-pointer writeback.
+ */
+void xbox360_attach_ring(struct xbox360_display *d,
+                         volatile uint32_t *ring_buffer,
+                         unsigned ring_size_log2,
+                         uint32_t *wptr_slot,
+                         volatile uint32_t *rptr_page);
 
 #ifdef __cplusplus
 }

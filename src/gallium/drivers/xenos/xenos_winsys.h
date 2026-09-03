@@ -33,6 +33,14 @@ struct xenos_winsys
     * implementation is responsible for copying the dwords into the ring
     * (keeping 64-dword block alignment) and bumping CP_RB_WPTR. */
    void (*ring_submit)(void *ws, const uint32_t *dwords_be, unsigned ndwords);
+
+   /* Primary ring attachment, filled by the target once the sample layer
+    * has created the VD ring (screen.c) - the driver shares it with VdSwap.
+    * ring_buffer/wptr_slot/rptr_page are NULL until then. */
+   volatile uint32_t *ring_buffer;   /**< guest VA of the primary ring */
+   unsigned ring_size_log2;          /**< dwords = 1 << (log2 + 3) */
+   uint32_t *wptr_slot;              /**< shared free-running write pointer */
+   volatile uint32_t *rptr_page;     /**< CP read-pointer writeback page */
 };
 
 #endif /* XENOS_WINSYS_H */

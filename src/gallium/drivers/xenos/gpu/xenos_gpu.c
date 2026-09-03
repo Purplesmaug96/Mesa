@@ -50,12 +50,11 @@ void xe_gpu_ring_submit(xenos_ring *ring, const uint32_t *cmds,
     uint32_t n1 = block < wrap ? block : wrap;
     uint32_t i = 0;
     for (; i < n1; i++)
-        ring->buffer[first + i] = i < ndwords ? cmds[i] : 0x00000080u;
+        ring->buffer[first + i] = i < ndwords ? cmds[i] : 0x80000000u;
     if (block > n1)
         for (; i < block; i++)
-            ring->buffer[i - n1] = i < ndwords ? cmds[i] : 0x00000080u;
+            ring->buffer[i - n1] = i < ndwords ? cmds[i] : 0x80000000u;
     ring->write_ptr = (ring->write_ptr + block) % ring->size_dwords;
-    *((volatile uint32_t *)XE_MMIO_ADDR(XE_REG_CP_RB_WPTR)) = ring->write_ptr;
 }
 
 void xe_gpu_cmd_init(xenos_cmdbuf *cb, xenos_ring *ring, uint32_t *dwords)
@@ -158,7 +157,7 @@ int xe_gpu_init_baseline(xenos_ring *ring, uint32_t *scratch)
     xe_gpu_cmd_wait_for_idle(&cb); /* NOP pad */
     xe_gpu_cmd_event_write(&cb, 0x7A); /* CACHE_FLUSH_TS */
     while (cb.used < 64)
-        xe_gpu_cmd_push32(&cb, 0x80000000u); /* Type2 filler (VdSwap style) */
+        xe_gpu_cmd_push32(&cb, 0x80000000u); /* Type2 filler */
     xe_gpu_cmd_submit(&cb);
     return 0;
 }
@@ -201,9 +200,9 @@ static uint32_t s_triangle_vb_phys;
 static int xe_triangle_alloc_vb(void)
 {
     static const float verts[3][4] = {
-        { -1.5f, -1.5f, 0.0f, 1.0f },
-        {  3.5f, -1.5f, 0.0f, 1.0f },
-        { -1.5f,  3.5f, 0.0f, 1.0f },
+        { -0.6f, -0.6f, 0.0f, 1.0f },
+        {  0.6f, -0.6f, 0.0f, 1.0f },
+        {  0.0f,  0.6f, 0.0f, 1.0f },
     };
 
     if (s_triangle_vb)
@@ -630,9 +629,9 @@ static void xe_triangle_shaders_nir_real(xenos_cmdbuf *cb)
     xe_gpu_cmd_reg_write(cb, XE_REG_SQ_INTERPOLATOR_CNTL, 0u);
 
     /* FS color uniform: driver_location 0 -> PS bank const 0.
-     * Distinctive orange so shader-driven output is obvious. */
-    uint32_t pc[4] = { float32_bits(1.0f), float32_bits(0.5f),
-                       float32_bits(0.0f), float32_bits(1.0f) };
+     * Magenta, matching the sample's intent. */
+    uint32_t pc[4] = { float32_bits(1.0f), float32_bits(0.0f),
+                       float32_bits(1.0f), float32_bits(1.0f) };
     xe_gpu_cmd_reg_writen(cb, XE_REG_SHADER_CONST(256u + 0u), 4, pc);
 
     /* IM_LOAD_IMMEDIATE vertex shader. */
@@ -759,17 +758,6 @@ static int xe_resolve_wait(uint32_t want_wptr)
  * zero base).  The resolve shader always stores 4 consecutive pixels per
  * thread on 16-byte boundaries, so per-pixel byte offsets are dword-aligned
  * for 32bpp. */
-static uint32_t xe_tiled_offset_2d(uint32_t x, uint32_t y, uint32_t pitch,
-                                   uint32_t bpb_log2)
-{
-    uint32_t macro = ((x >> 5) + (y >> 5) * (pitch >> 5)) << (bpb_log2 + 7);
-    uint32_t micro = ((x & 7) + ((y & 0xEu) << 2)) << bpb_log2;
-    uint32_t offset = macro + ((micro & ~0xFu) << 1) + (micro & 0xFu) +
-                      ((y & 1) << 4);
-    return ((offset & ~0x1FFu) << 3) + ((y & 16u) << 7) +
-           ((offset & 0x1C0u) << 2) +
-           (((((y & 8) >> 2) + (x >> 3)) & 3) << 6) + (offset & 0x3Fu);
-}
 
 static void xe_resolve_submit(xenos_cmdbuf *cb)
 {
@@ -838,14 +826,6 @@ int xe_gpu_dev_triangle_nir(uint32_t ring_va, uint32_t size_log2,
     /* Second draw in kCopy mode: resolves EDRAM tile 0 into system memory
      * (tiled destination), covered by the drawn resolve rectangle. */
     if (!skip_resolve)
-        /* Probe: pre-fill the destination so we can tell whether the copy
-         * wrote at all (pattern replaced => copy executed; pattern intact =>
-         * it never wrote). */
-        {
-            volatile uint32_t *probe = (volatile uint32_t *)s_resolve_dest;
-            for (uint32_t i = 0; i < 256u; i++)
-                probe[i] = 0xABCD0000u + i;
-        }
         xe_resolve_submit(&cb);
 
     DbgPrint("xenos: tri_nir cb_used=%u vs_slots=%u ps_slots=%u", cb.used,
@@ -872,37 +852,20 @@ int xe_gpu_dev_triangle_nir(uint32_t ring_va, uint32_t size_log2,
             DbgPrint("xenos: resolve wait timed out (wptr=%u)", ring.write_ptr);
             return -1;
         }
-        /* RPTR only means the CP encoded the work; the host GPU queue may
-         * still be executing it.  Give it a moment before reading. */
-        {
-            int64_t settle = -200 * 1000 * 1000; /* 200 ms */
-            KeDelayExecutionThread(0, 0, &settle);
-        }
-        {
-            const uint32_t *src = (const uint32_t *)s_resolve_dest;
-            __builtin___clear_cache((char *)src, (char *)src + 16);
-            DbgPrint("xenos: resolve dest[0..3]=%08x %08x %08x %08x",
-                     src[0], src[1], src[2], src[3]);
-        }
-
-        /* Unswizzle the tiled resolve destination into the linear front
-         * buffer at (0,0); the xenia presenter reads it as RGBA8. */
-        {
-            const uint32_t *src = (const uint32_t *)s_resolve_dest;
-            uint32_t *dst = (uint32_t *)(uintptr_t)front_va;
-            for (uint32_t y = 0; y < XE_DEV_RESOLVE_H; y++) {
-                for (uint32_t x = 0; x < XE_DEV_RESOLVE_W; x++) {
-                    uint32_t off = xe_tiled_offset_2d(x, y, XE_DEV_RESOLVE_W, 2);
-                    dst[(uintptr_t)y * 1280 + x] = src[off >> 2];
-                }
-            }
-            __builtin___clear_cache((char *)dst, (char *)(dst + 1280 * 480));
-            DbgPrint("xenos: unswizzle dst[0]=%08x dst[320+240*1280]=%08x",
-                     dst[0], dst[320 + 240 * 1280]);
-        }
     }
 
     DbgPrint("xenos: dev triangle (NIR) rendered%s",
              skip_resolve ? " (resolve skipped)" : " + resolved");
     return 0;
+}
+
+void xe_gpu_get_resolve_surface(uint32_t *phys_out, uint32_t *w_out,
+                                uint32_t *h_out)
+{
+    if (phys_out)
+        *phys_out = s_resolve_dest_phys;
+    if (w_out)
+        *w_out = XE_DEV_RESOLVE_W;
+    if (h_out)
+        *h_out = XE_DEV_RESOLVE_H;
 }

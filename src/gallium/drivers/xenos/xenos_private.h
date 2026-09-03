@@ -22,6 +22,10 @@ struct xenos_screen
 {
    struct pipe_screen base;
    struct xenos_winsys *ws;
+
+   /* EDRAM tile bump allocator: render targets claim ranges of the 10 MB
+    * embedded DRAM (each tile is 2 KB; pitch/rows per surface). */
+   unsigned next_edram_tile;
 };
 
 static inline struct xenos_screen *

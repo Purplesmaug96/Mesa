@@ -25,6 +25,15 @@ struct xenos_resource
                            fetch constants and packets */
    unsigned size;       /* bytes allocated */
    unsigned stride;     /* bytes per row of level 0 */
+
+   /* Render targets additionally own an EDRAM tile range (the actual GPU
+    * drawing surface) and a tiled system-memory resolve backing. */
+   uint32_t has_edram;        /* render target with EDRAM backing */
+   uint32_t edram_base;       /* first tile index */
+   uint32_t edram_pitch_tiles;
+   uint32_t edram_rows;
+   void *resolve_data;        /* tiled system memory the GPU copies into */
+   uint32_t resolve_phys;     /* ... its physical address */
 };
 
 static inline struct xenos_resource *

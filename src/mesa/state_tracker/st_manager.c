@@ -29,6 +29,8 @@
  */
 
 #include "main/mtypes.h"
+
+extern void DbgPrint(const char *fmt, ...);
 #include "main/extensions.h"
 #include "main/context.h"
 #include "main/debug_output.h"
@@ -1017,9 +1019,11 @@ st_api_create_context(struct pipe_frontend_screen *fscreen,
    st_visual_to_context_mode(&attribs->visual, &mode);
    if (attribs->visual.color_format == PIPE_FORMAT_NONE)
       mode_ptr = NULL;
+   DbgPrint("xenos: calling st_create_context");
    st = st_create_context(attribs->profile, pipe, mode_ptr, shared_ctx,
                           &attribs->options, no_error,
                           !!fscreen->validate_egl_image);
+   DbgPrint("xenos: st_create_context returned %p", st);
    if (!st) {
       *error = ST_CONTEXT_ERROR_NO_MEMORY;
       pipe->destroy(pipe);
@@ -1069,10 +1073,12 @@ st_api_create_context(struct pipe_frontend_screen *fscreen,
       }
    }
 
+   DbgPrint("xenos: tail A");
    st->can_scissor_clear = !!st->screen->caps.clear_scissored;
-
+   DbgPrint("xenos: tail B");
    st->ctx->invalidate_on_gl_viewport =
       fscreen->get_param(fscreen, ST_MANAGER_BROKEN_INVALIDATE);
+   DbgPrint("xenos: tail C");
 
    st->frontend_screen = fscreen;
 

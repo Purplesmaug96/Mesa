@@ -28,6 +28,8 @@
 
 
 #include "main/accum.h"
+
+extern void DbgPrint(const char *fmt, ...);
 #include "main/context.h"
 #include "main/debug_output.h"
 #include "main/framebuffer.h"
@@ -774,6 +776,7 @@ st_create_context(gl_api api, struct pipe_context *pipe,
                   const struct st_config_options *options,
                   bool no_error, bool has_egl_image_validate)
 {
+   DbgPrint("xenos: st_create_context enter");
    struct gl_context *ctx;
    struct gl_context *shareCtx = share ? share->ctx : NULL;
    struct dd_function_table funcs;
@@ -791,11 +794,13 @@ st_create_context(gl_api api, struct pipe_context *pipe,
    ctx->pipe = pipe;
    ctx->screen = pipe->screen;
 
+   DbgPrint("xenos: st funcs init ok");
    if (!_mesa_initialize_context(ctx, api, no_error, visual, shareCtx, &funcs,
                                  options)) {
       align_free(ctx);
       return NULL;
    }
+   DbgPrint("xenos: _mesa_initialize_context ok");
 
    st_debug_init();
 

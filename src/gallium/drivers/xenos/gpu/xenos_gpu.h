@@ -88,4 +88,10 @@ int xe_gpu_dev_triangle_nir(uint32_t ring_va, uint32_t size_log2,
                             uint32_t start_wptr, uint32_t front_va,
                             uint32_t *wptr_out, int skip_resolve);
 
+/* GPU-present source: the tiled surface the dev triangle resolves into.
+ * Point screen_present's override at this so VdSwap samples it through
+ * xenia's swap texture (fetch constant 0) instead of the CPU front buffer. */
+void xe_gpu_get_resolve_surface(uint32_t *phys_out, uint32_t *w_out,
+                                uint32_t *h_out);
+
 #endif /* XENOS_GPU_H */

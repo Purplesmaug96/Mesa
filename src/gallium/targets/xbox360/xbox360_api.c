@@ -32,6 +32,13 @@
 
 #include "xbox360_api.h"
 #include "xbox360_screen.h"
+#include "xenos_public.h"
+
+void xbox360_xenos_attach_ring(struct pipe_screen *screen,
+                               volatile uint32_t *ring_buffer,
+                               unsigned ring_size_log2,
+                               uint32_t *wptr_slot,
+                               volatile uint32_t *rptr_page);
 
 struct xbox360_display
 {
@@ -219,14 +226,18 @@ xbox360_create(struct xbox360_display **out, uint32_t width, uint32_t height)
 
    memset(&attribs, 0, sizeof(attribs));
    attribs.profile = API_OPENGL_COMPAT;
-   attribs.major = 3;
-   attribs.minor = 3;
+   /* GL 2.1 covers the classic fixed-function samples; the extension set
+    * advertised by the xenos driver does not reach 3.3 yet. */
+   attribs.major = 2;
+   attribs.minor = 1;
    attribs.visual = d->visual;
 
    DbgPrint("xbox360_create: creating st context (GL %u.%u compat)...",
             attribs.major, attribs.minor);
 
+   DbgPrint("xbox360_create: calling st_api_create_context");
    d->context = st_api_create_context(&d->fscreen, &attribs, &sterr, NULL);
+   DbgPrint("xbox360_create: st_api_create_context returned %p", d->context);
    if (!d->context) {
       DbgPrint("xbox360_create: st_api_create_context failed (sterr=%d)",
                (int)sterr);
@@ -259,10 +270,9 @@ xbox360_present(struct xbox360_display *d, struct xbox360_frame *frame)
    struct pipe_box box;
    struct pipe_context *pipe;
 
-   frame->ptr = NULL;
+   memset(frame, 0, sizeof(*frame));
    frame->width = d->width;
    frame->height = d->height;
-   frame->stride = 0;
 
    if (!d->context)
       return;
@@ -272,6 +282,18 @@ xbox360_present(struct xbox360_display *d, struct xbox360_frame *frame)
    st_context_flush(d->context, ST_FLUSH_END_OF_FRAME | ST_FLUSH_WAIT,
                     NULL, NULL, NULL);
 
+   /* Hardware path: resolve the colour target into its tiled backing and
+    * hand the physical address to the caller for VdSwap's swap texture. */
+   {
+      struct xenos_present_info info;
+      if (xenos_flush_frame(pipe, d->color, &info)) {
+         frame->gpu_tiled = true;
+         frame->gpu_phys = info.phys;
+         return;
+      }
+   }
+
+   /* Softpipe fallback: map and expose the CPU pixels. */
    if (d->present)
       pipe->texture_unmap(pipe, d->present);
    d->present = NULL;
@@ -288,6 +310,17 @@ xbox360_present(struct xbox360_display *d, struct xbox360_frame *frame)
 
    frame->ptr = d->mapped;
    frame->stride = d->present->stride;
+}
+
+void
+xbox360_attach_ring(struct xbox360_display *d,
+                    volatile uint32_t *ring_buffer,
+                    unsigned ring_size_log2,
+                    uint32_t *wptr_slot,
+                    volatile uint32_t *rptr_page)
+{
+   xbox360_xenos_attach_ring(d->fscreen.screen, ring_buffer, ring_size_log2,
+                             wptr_slot, rptr_page);
 }
 
 void

@@ -11,6 +11,7 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 
 #include <xecore/xboxkrnl.h>
 
@@ -18,7 +19,7 @@
 
 #include "xenos_public.h"
 #include "xenos_winsys.h"
-
+#include "xenos_private.h"
 #include "../xbox360_screen.h"
 
 struct xenos_xecore_winsys
@@ -73,4 +74,23 @@ xbox360_screen_create(void)
    winsys->base.ring_submit = xenos_xecore_ring_submit;
 
    return xenos_screen_create(&winsys->base);
+}
+
+void
+xbox360_xenos_attach_ring(struct pipe_screen *screen,
+                          volatile uint32_t *ring_buffer,
+                          unsigned ring_size_log2,
+                          uint32_t *wptr_slot,
+                          volatile uint32_t *rptr_page)
+{
+   struct xenos_screen *xs = xenos_screen(screen);
+
+   if (!xs || xs->base.get_name(&xs->base) == NULL ||
+       strcmp(xs->base.get_name(&xs->base), "xenos") != 0)
+      return;
+
+   xs->ws->ring_buffer = ring_buffer;
+   xs->ws->ring_size_log2 = ring_size_log2;
+   xs->ws->wptr_slot = wptr_slot;
+   xs->ws->rptr_page = rptr_page;
 }
