@@ -26,7 +26,8 @@ struct nir_shader;
 struct xenos_vfetch_fixup
 {
    uint32_t ucode_dword; /* dword index of the slot's first dword */
-   uint32_t attrib;      /* VERT_ATTRIB_* = fetch-constant / vbuf index */
+   uint32_t attrib;      /* fetch-constant / vbuf slot index */
+   uint32_t dst_gpr;     /* GPR the fetch writes */
 };
 
 /* An opaque compiled Xenos shader: CF pair + vfetch/ALU slots + the metadata
@@ -48,6 +49,10 @@ struct xenos_shader
     * 252..255.  The draw path uploads the shader's const buffer to
     * SHADER_CONSTANT_000_X. */
    uint32_t num_consts;
+   /* First const index that is a relocated immediate (indices below it come
+    * from the UBO).  The immediate values live in const_values[]. */
+   uint32_t num_ubos;
+   float *const_values;
 
    unsigned num_inputs;
    unsigned num_outputs;

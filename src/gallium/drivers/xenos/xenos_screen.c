@@ -381,5 +381,10 @@ xenos_screen_create(struct xenos_winsys *ws)
    xenos_init_shader_caps(screen);
    xenos_init_screen_resource_funcs(&screen->base);
 
+   /* Reserve 1 EDRAM tile for a dummy depth surface used when the GL context
+    * has no depth buffer.  See xenos_emit_frame_state. */
+   screen->dummy_depth_edram_base = screen->next_edram_tile;
+   screen->next_edram_tile += 1;
+
    return &screen->base;
 }

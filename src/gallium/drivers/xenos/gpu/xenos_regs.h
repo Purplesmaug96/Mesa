@@ -55,6 +55,7 @@
 #define XE_REG_PA_CL_CLIP_CNTL      0x2204u
 #define XE_REG_PA_SU_SC_MODE_CNTL   0x2205u
 #define XE_REG_PA_CL_VTE_CNTL       0x2206u
+#define XE_REG_RB_DEPTHCONTROL      0x2200u
 #define XE_REG_RB_MODECONTROL       0x2208u
 
 #define XE_REG_RB_SURFACE_INFO  0x2000u

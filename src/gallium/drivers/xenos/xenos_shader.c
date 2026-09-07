@@ -83,6 +83,7 @@ struct xe_cctx
 
    struct xenos_vfetch_fixup vfetch[16];
    uint32_t vfetch_count;
+   uint32_t next_fetch_slot; /* consecutive fetch-constant slot index */
 
    bool failed;
 };
@@ -283,11 +284,12 @@ xe_vfetch(struct xe_cctx *c, uint32_t attrib, uint32_t dst_gpr)
    xe_ucode_vfetch(slot, attrib, dst_gpr, XE_UCODE_DST_SWIZ_XYZW,
                    0 /* r0.x = auto vertex index */, 0,
                    XE_UCODE_FORMAT_32_32_32_32_FLOAT, 0, 0, true, true);
-   uint32_t slot_idx = c->num_slots;
-   if (c->vfetch_count < 16) {
-      c->vfetch[c->vfetch_count].ucode_dword = 3 + 3 * slot_idx;
-      c->vfetch[c->vfetch_count].attrib = attrib;
-      c->vfetch_count++;
+    uint32_t slot_idx = c->num_slots;
+    if (c->vfetch_count < 16) {
+       c->vfetch[c->vfetch_count].ucode_dword = 3 + 3 * slot_idx;
+       c->vfetch[c->vfetch_count].attrib = attrib;
+       c->vfetch[c->vfetch_count].dst_gpr = dst_gpr;
+       c->vfetch_count++;
    } else {
       c->failed = true;
    }
@@ -355,12 +357,24 @@ static void
 xe_emit_vs_vfetch(struct xe_cctx *c, nir_intrinsic_instr *intr)
 {
    uint32_t attrib = nir_intrinsic_io_semantics(intr).location;
-   uint32_t gpr = attrib; /* attrib i -> GPR i */
+   uint32_t gpr = attrib; /* NIR location -> GPR (may have gaps) */
+   unsigned ncomp = intr->def.num_components;
+   DbgPrint("[VFDPROBE] VSLOAD attrib=%u ncomp=%u", attrib, ncomp);
    if (gpr + 1 > c->max_gpr)
       c->max_gpr = gpr + 1;
    if (gpr >= c->next_temp_gpr)
       c->next_temp_gpr = gpr + 1;
-   xe_vfetch(c, attrib, gpr);
+   uint32_t fetch_slot = c->next_fetch_slot++; /* consecutive slot */
+   xe_vfetch(c, fetch_slot, gpr);
+   /* Fixed-function position is declared vec4 but the vertex element often
+    * carries only 2D components (glVertex2f).  Ensure z=0, w=1 so the MVP
+    * divide-by-w stays finite. */
+   if (attrib == 0) {
+      float zw[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+      uint32_t k = xe_add_const(c, zw, 4);
+      xe_emit_mov(c, gpr, 0xC, &(xe_ucode_alu_src){ false, k,
+                      XE_UCODE_ALU_SWIZ_XYZW, false });
+   }
    xe_def_set(c, &intr->def, (xe_ucode_alu_src){ true, gpr,
                XE_UCODE_ALU_SWIZ_XYZW, false });
 }
@@ -753,6 +767,14 @@ free(c.defs);
              3 * c.num_slots * sizeof(uint32_t));
       shader->num_gprs = c.max_gpr;
       shader->num_consts = c.num_consts;
+      shader->num_ubos = c.next_imm_const;
+      shader->const_values = NULL;
+      if (c.num_consts > c.next_imm_const) {
+         uint32_t nimm = c.num_consts - c.next_imm_const;
+         shader->const_values = malloc(4 * nimm * sizeof(float));
+         memcpy(shader->const_values, c.const_values + 4 * c.next_imm_const,
+                4 * nimm * sizeof(float));
+      }
       shader->num_inputs = util_bitcount(nir->info.inputs_read);
       shader->num_outputs = util_bitcount(nir->info.outputs_written);
       shader->varying_mask = c.varying_mask;
@@ -833,5 +855,6 @@ xenos_delete_shader(struct xenos_shader *shader)
    if (!shader)
       return;
    free(shader->ucode);
+   free(shader->const_values);
    FREE(shader);
 }

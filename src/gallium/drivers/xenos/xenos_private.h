@@ -26,6 +26,11 @@ struct xenos_screen
    /* EDRAM tile bump allocator: render targets claim ranges of the 10 MB
     * embedded DRAM (each tile is 2 KB; pitch/rows per surface). */
    unsigned next_edram_tile;
+
+   /* Dummy depth surface EDRAM base: one tile reserved at init so the host
+    * always has a depth attachment in the render pass even when the GL context
+    * has no depth buffer.  See xenos_emit_frame_state. */
+   unsigned dummy_depth_edram_base;
 };
 
 static inline struct xenos_screen *

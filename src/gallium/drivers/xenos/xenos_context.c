@@ -629,15 +629,22 @@ xenos_emit_frame_state(struct xenos_context *x)
    struct xenos_resource *depth =
       (fb->zsbuf.texture)
          ? xenos_resource(fb->zsbuf.texture) : NULL;
-   uint32_t w = fb->width, h = fb->height;
+    uint32_t w = fb->width, h = fb->height;
 
-   if (!w || !h)
-      return;
+    if (!w || !h)
+       return;
 
-   ctx_reserve(x, 256);
+    ctx_reserve(x, 256);
 
-   /* Surfaces. */
-   xe_gpu_cmd_reg_write(&x->cb, XE_REG_RB_SURFACE_INFO, w | (XE_MSAA_1X << 16));
+    {
+       unsigned cw = color ? color->base.width0 : 0;
+       unsigned ch = color ? color->base.height0 : 0;
+       DbgPrint("FRAMEINFO fbw=%u fbh=%u cw=%u ch=%u pitch_field=%u",
+                w, h, cw, ch, w & 0x3FFF);
+    }
+
+    /* Surfaces. */
+    xe_gpu_cmd_reg_write(&x->cb, XE_REG_RB_SURFACE_INFO, w | (XE_MSAA_1X << 16));
    {
       /* color_base: bits 0-11 (tile index), format bits 16-19. */
       uint32_t ci = color ? ((color->edram_base & 0x7FF) |
@@ -647,9 +654,57 @@ xenos_emit_frame_state(struct xenos_context *x)
    }
    {
       /* depth_format bit: 0 = kD24S8. */
-      uint32_t di = depth ? ((depth->edram_base & 0x7FF) |
-                             ((depth->edram_base >> 11) << 11)) : 0;
+      uint32_t di;
+      if (depth) {
+         di = ((depth->edram_base & 0x7FF) |
+               ((depth->edram_base >> 11) << 11));
+      } else {
+         /* WORKAROUND: Always emit a valid RB_DEPTHINFO so the host includes
+          * a depth attachment in the render pass.  Without this, draws without
+          * a depth buffer hit a host code path that enables depth testing with
+          * NEVER comparison, killing every fragment.
+          *
+          * TODO(Xbox360): Determine whether real Xbox 360 hardware also
+          * requires a depth surface to be configured even when depth testing
+          * is disabled, or if this is purely a host emulation bug. */
+         di = ((x->screen->dummy_depth_edram_base & 0x7FF) |
+               ((x->screen->dummy_depth_edram_base >> 11) << 11));
+      }
       xe_gpu_cmd_reg_write(&x->cb, XE_REG_RB_DEPTH_INFO, di);
+   }
+   {
+      /* Depth test controls.  Emit from the bound DSA state so the host does
+       * not inherit a stale RB_DEPTHCONTROL (default zfunc=NEVER, which would
+       * reject every fragment).  When depth testing is disabled, use ALWAYS so
+       * the host keeps depth testing off.  PIPE_FUNC_* and the Xenos
+       * CompareFunction share the same numeric encoding. */
+      const struct pipe_depth_stencil_alpha_state *dsa =
+         x->dsa ? (const struct pipe_depth_stencil_alpha_state *)x->dsa : NULL;
+      bool depth_enabled = dsa && dsa->depth_enabled;
+      bool depth_writemask = dsa && dsa->depth_writemask;
+      uint32_t zfunc = dsa ? (uint32_t)dsa->depth_func
+                           : (uint32_t)PIPE_FUNC_ALWAYS;
+      /* WORKAROUND: When depth testing is disabled, force z_enable=1 with
+       * zfunc=ALWAYS so the host includes the depth attachment in the render
+       * pass.  The host gates depth RT inclusion on z_enable, not on whether
+       * RB_DEPTHINFO is set.  Without this, the host enables depth test with
+       * NEVER comparison when there's no depth attachment, killing all
+       * fragments.
+       *
+       * TODO(Xbox360): Determine whether real Xbox 360 hardware also
+       * requires z_enable to be set even when depth testing is functionally
+       * off, or if this is purely a host emulation bug. */
+      if (!depth_enabled) {
+         depth_enabled = true;
+         zfunc = (uint32_t)PIPE_FUNC_ALWAYS;
+         depth_writemask = false;
+      }
+      uint32_t dc = (depth_enabled ? (1u << 1) : 0) |
+                    (depth_writemask ? (1u << 2) : 0) |
+                    (zfunc << 4);
+      DbgPrint("[DCDBG] RB_DEPTHCONTROL dc=%08x dsa=%p fen=%d fwr=%d ffunc=%u",
+               dc, (void *)dsa, depth_enabled, depth_writemask, zfunc);
+      xe_gpu_cmd_reg_write(&x->cb, XE_REG_RB_DEPTHCONTROL, dc);
    }
 
    /* Scissors/cliprect: full target. */
@@ -667,6 +722,10 @@ xenos_emit_frame_state(struct xenos_context *x)
 
    /* Colour write, no blending (opaque) for M1. */
    xe_gpu_cmd_reg_write(&x->cb, XE_REG_RB_COLOR_MASK, 0xF);
+   /* No blending: src=kOne(1), dest=kZero(0), ADD(0) on colour and alpha.
+    * Must be emitted explicitly, otherwise a stale/zero RB_BLENDCONTROL
+    * (src=kZero) makes the host blend the output to zero and nothing shows. */
+   xe_gpu_cmd_reg_write(&x->cb, XE_REG_RB_BLENDCONTROL0, 0x00010001u);
 
    /* Viewport transform.  Gallium gives GL-style scale/translate; the Xenos
     * D3D pixel-center convention needs a half-pixel shift. */
@@ -740,7 +799,7 @@ xenos_upload_constants(struct xenos_context *x, struct xenos_shader *sh,
    if (!sh || !sh->num_consts || !cbuf->buffer_size)
       return;
 
-   num_vec4s = MIN2(sh->num_consts, cbuf->buffer_size / 16);
+   num_vec4s = MIN2(sh->num_ubos, cbuf->buffer_size / 16);
    if (!num_vec4s)
       return;
 
@@ -753,11 +812,16 @@ xenos_upload_constants(struct xenos_context *x, struct xenos_shader *sh,
       return;
    }
 
-   ctx_reserve(x, num_vec4s * 5);
+   uint32_t base = stage == MESA_SHADER_FRAGMENT ? 256u : 0u;
+   ctx_reserve(x, (num_vec4s + sh->num_consts - sh->num_ubos) * 5);
    for (unsigned i = 0; i < num_vec4s; ++i) {
-      uint32_t base = stage == MESA_SHADER_FRAGMENT ? 256u : 0u;
       xe_gpu_cmd_reg_writen(&x->cb, XE_REG_SHADER_CONST(base + i), 4,
                             (const uint32_t *)(data + i * 16));
+   }
+   for (unsigned i = sh->num_ubos; i < sh->num_consts; ++i) {
+      xe_gpu_cmd_reg_writen(&x->cb, XE_REG_SHADER_CONST(base + i), 4,
+                            (const uint32_t *)(sh->const_values +
+                                               (i - sh->num_ubos) * 4));
    }
 }
 
@@ -803,19 +867,27 @@ xenos_patch_vfetch(struct xenos_context *x)
    DbgPrint("[VFDPROBE] vfetch_count=%u num_ve=%u vs=%p ve=%p",
             vs ? vs->vfetch_count : 99, x->num_vertex_elements, (void *)vs,
             (void *)ve);
-   if (!vs || !vs->vfetch_count || !ve)
-      return;
-   elements = ve->elements;
+if (!vs || !vs->vfetch_count || !ve)
+       return;
+    elements = ve->elements;
+    DbgPrint("[VFDPROBE] VELEMS nve=%u:", x->num_vertex_elements);
+    for (uint32_t ei = 0; ei < x->num_vertex_elements && ei < PIPE_MAX_ATTRIBS; ++ei)
+       DbgPrint("[VFDPROBE] VELEM elem=%u buf=%u off=%u fmt=%u stride=%u",
+                ei, elements[ei].vertex_buffer_index, elements[ei].src_offset,
+                elements[ei].src_format, elements[ei].src_stride);
 
-   for (uint32_t f = 0; f < vs->vfetch_count; ++f) {
-      struct xenos_vfetch_fixup *fx = &vs->vfetch[f];
-      const struct pipe_vertex_element *e = NULL;
-      struct pipe_vertex_buffer *vb;
-      uint32_t phys, out[3];
+    for (uint32_t f = 0; f < vs->vfetch_count; ++f) {
+       struct xenos_vfetch_fixup *fx = &vs->vfetch[f];
+       const struct pipe_vertex_element *e = NULL;
+       struct pipe_vertex_buffer *vb;
+       uint32_t phys, out[3];
+       DbgPrint("[VFDPROBE] VFIXUP f=%u attrib=%u nve=%u skip=%d",
+                f, fx->attrib, x->num_vertex_elements,
+                (fx->attrib >= x->num_vertex_elements));
 
-      if (fx->attrib >= x->num_vertex_elements ||
-          fx->attrib >= PIPE_MAX_ATTRIBS)
-         continue;
+       if (fx->attrib >= x->num_vertex_elements ||
+           fx->attrib >= PIPE_MAX_ATTRIBS)
+          continue;
       e = &elements[fx->attrib];
       vb = &x->vertex_buffers[e->vertex_buffer_index];
       if (!vb)
@@ -832,7 +904,7 @@ xenos_patch_vfetch(struct xenos_context *x)
 
       phys += e->src_offset;
 
-      xe_ucode_vfetch(out, fx->attrib, fx->attrib, XE_UCODE_DST_SWIZ_XYZW,
+      xe_ucode_vfetch(out, fx->attrib, fx->dst_gpr, XE_UCODE_DST_SWIZ_XYZW,
                       0, 0, xenos_vfmt(e->src_format),
                       e->src_stride >> 2, 0, true, true);
       vs->ucode[fx->ucode_dword + 0] = out[0];
@@ -849,22 +921,34 @@ xenos_patch_vfetch(struct xenos_context *x)
          &x->vertex_buffers[e->vertex_buffer_index];
       xenos_vertex_fetch vf;
       uint32_t phys;
+      uint32_t fetch_bytes;
 
       if (!vb)
          continue;
 
-      if (!vb->is_user_buffer && vb->buffer.resource)
-         phys = (xenos_resource(vb->buffer.resource)->gpu_addr << 2) +
-                vb->buffer_offset;
-      else
+      if (!vb->is_user_buffer && vb->buffer.resource) {
+         struct xenos_resource *xr = xenos_resource(vb->buffer.resource);
+         phys = (xr->gpu_addr << 2) + vb->buffer_offset;
+         /* The fetch constant size bounds the whole fetchable range of the
+          * vertex buffer, not a single attribute's stride — the sequencer
+          * reads base + vertex_index * stride for every vertex of the draw,
+          * so all of it must sit inside [base, base + size). */
+         fetch_bytes = xr->size - vb->buffer_offset;
+         if (fetch_bytes < 4u)
+            fetch_bytes = 4u;   /* at least one word */
+         phys += e->src_offset;
+         if (vb->buffer_offset + e->src_offset > xr->size ||
+             xr->size - vb->buffer_offset - e->src_offset < 4u)
+            fetch_bytes = 4u;
+      } else
          continue;
 
-      DbgPrint("[VFDPROBE] fc elem=%u phys=%08x data_va=%08x off=%u stride=%u",
-               i, phys + e->src_offset,
+      DbgPrint("[VFDPROBE] fc elem=%u phys=%08x data_va=%08x off=%u stride=%u size=%u",
+               i, phys,
                (uint32_t)(uintptr_t)xenos_resource(vb->buffer.resource)->data,
-               e->src_offset, e->src_stride);
+               e->src_offset, e->src_stride, fetch_bytes);
 
-      xe_gpu_vfetch_build(&vf, phys + e->src_offset, MAX2(e->src_stride, 4u),
+      xe_gpu_vfetch_build(&vf, phys, MAX2(fetch_bytes, 4u),
                           XE_ENDIAN_8IN32);
       ctx_reserve(x, 3);
       xe_gpu_cmd_reg_writen(&x->cb,
@@ -909,14 +993,15 @@ xenos_clear(struct pipe_context *pipe, unsigned buffers,
    /* Point fetch constant 0 at a fullscreen triangle (NDC [-1..3], w=1) so
     * the minimal clear VS (vfetch const0 -> r0.xyzw) produces real NDC
     * positions covering the whole viewport, instead of stale/garbage data.
-    * The vertex index comes from the sequencer, stride 16 bytes. */
+    * The vertex index comes from the sequencer, stride 16 bytes. The fetch
+    * size spans all three vertices (12 words, 48 bytes), not just the first. */
    if (x->clear_vert) {
       float *cv = (float *)x->clear_vert;
       cv[ 0] = -1.0f; cv[ 1] = -1.0f; cv[ 2] = 0.0f; cv[ 3] = 1.0f;
       cv[ 4] =  3.0f; cv[ 5] = -1.0f; cv[ 6] = 0.0f; cv[ 7] = 1.0f;
       cv[ 8] = -1.0f; cv[ 9] =  3.0f; cv[10] = 0.0f; cv[11] = 1.0f;
       xenos_vertex_fetch vf = { 0 };
-      xe_gpu_vfetch_build(&vf, x->clear_vert_phys, 16u, XE_ENDIAN_8IN32);
+      xe_gpu_vfetch_build(&vf, x->clear_vert_phys, 48u, XE_ENDIAN_8IN32);
       ctx_reserve(x, 3);
       xe_gpu_cmd_reg_writen(&x->cb, XE_REG_SHADER_CONST_FETCH(0), 2,
                             (const uint32_t *)&vf);
