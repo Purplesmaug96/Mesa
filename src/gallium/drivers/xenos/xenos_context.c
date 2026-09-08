@@ -60,6 +60,8 @@ struct xenos_context
    struct pipe_framebuffer_state framebuffer;
    void *blend;
    void *dsa;
+   struct pipe_depth_stencil_alpha_state clear_dsa;
+   unsigned dsa_override_active;
    void *rasterizer;
    struct xenos_shader *vs;
    struct xenos_shader *fs;
@@ -639,8 +641,10 @@ xenos_emit_frame_state(struct xenos_context *x)
     {
        unsigned cw = color ? color->base.width0 : 0;
        unsigned ch = color ? color->base.height0 : 0;
-       DbgPrint("FRAMEINFO fbw=%u fbh=%u cw=%u ch=%u pitch_field=%u",
-                w, h, cw, ch, w & 0x3FFF);
+       unsigned dw = depth ? depth->base.width0 : 0;
+       unsigned dh = depth ? depth->base.height0 : 0;
+       DbgPrint("FRAMEINFO fbw=%u fbh=%u cw=%u ch=%u dw=%u dh=%u pitch_field=%u",
+                w, h, cw, ch, dw, dh, w & 0x3FFF);
     }
 
     /* Surfaces. */
@@ -733,7 +737,8 @@ xenos_emit_frame_state(struct xenos_context *x)
       const struct pipe_viewport_state *vp = &x->viewport[0];
       uint32_t vte = XE_VTE_VPORT_X_SCALE_ENA | XE_VTE_VPORT_X_OFFSET_ENA |
                      XE_VTE_VPORT_Y_SCALE_ENA | XE_VTE_VPORT_Y_OFFSET_ENA |
-                     XE_VTE_VPORT_Z_SCALE_ENA | XE_VTE_VPORT_Z_OFFSET_ENA;
+                     XE_VTE_VPORT_Z_SCALE_ENA | XE_VTE_VPORT_Z_OFFSET_ENA |
+                     XE_VTE_VTX_W0_FMT;
       xe_gpu_cmd_reg_write(&x->cb, XE_REG_PA_CL_VTE_CNTL, vte);
        xe_gpu_cmd_reg_write(&x->cb, XE_REG_PA_CL_VPORT_XSCALE,
                            float_bits(vp->scale[0]));
@@ -748,7 +753,7 @@ xenos_emit_frame_state(struct xenos_context *x)
        xe_gpu_cmd_reg_write(&x->cb, XE_REG_PA_CL_VPORT_ZOFFSET,
                            float_bits(vp->translate[2]));
        static int s_vp_once = 0;
-       if (s_vp_once++ < 4)
+       if (s_vp_once++ < 20)
          DbgPrint("[VPORT] sx=%08x sy=%08x sz=%08x tx=%08x ty=%08x tz=%08x "
                   "xo=%08x yo=%08x",
                   float_bits(vp->scale[0]), float_bits(vp->scale[1]),
@@ -812,11 +817,33 @@ xenos_upload_constants(struct xenos_context *x, struct xenos_shader *sh,
       return;
    }
 
+   if (stage == MESA_SHADER_VERTEX && num_vec4s >= 4) {
+      const float *m = (const float *)data;
+      DbgPrint("[VBCHECK] MVP(upload) c0 %.4f %.4f %.4f %.4f", m[0], m[1], m[2], m[3]);
+      DbgPrint("[VBCHECK]             c1 %.4f %.4f %.4f %.4f", m[4], m[5], m[6], m[7]);
+      DbgPrint("[VBCHECK]             c2 %.4f %.4f %.4f %.4f", m[8], m[9], m[10], m[11]);
+      DbgPrint("[VBCHECK]             c3 %.4f %.4f %.4f %.4f", m[12], m[13], m[14], m[15]);
+   }
+
    uint32_t base = stage == MESA_SHADER_FRAGMENT ? 256u : 0u;
    ctx_reserve(x, (num_vec4s + sh->num_consts - sh->num_ubos) * 5);
    for (unsigned i = 0; i < num_vec4s; ++i) {
       xe_gpu_cmd_reg_writen(&x->cb, XE_REG_SHADER_CONST(base + i), 4,
                             (const uint32_t *)(data + i * 16));
+   }
+   if (stage == MESA_SHADER_VERTEX && num_vec4s >= 4) {
+      /* Read back the dwords just written into the host-owned PM4 CB. */
+      const uint32_t *p = &x->cb.dwords[x->cb.used];
+      /* find start: reg writes were the last 4 groups of 5 dwords */
+      p = &x->cb.dwords[x->cb.used - num_vec4s * 5];
+      const float *vv = NULL;
+      for (unsigned i = 0; i < num_vec4s; i++) {
+         DbgPrint("[PM4MVP] c%u %08x %08x %08x %08x  = %.4f %.4f %.4f %.4f",
+                  i, p[i*5+1], p[i*5+2], p[i*5+3], p[i*5+4],
+                  *(const float *)&p[i*5+1], *(const float *)&p[i*5+2],
+                  *(const float *)&p[i*5+3], *(const float *)&p[i*5+4]);
+      }
+      (void)vv;
    }
    for (unsigned i = sh->num_ubos; i < sh->num_consts; ++i) {
       xe_gpu_cmd_reg_writen(&x->cb, XE_REG_SHADER_CONST(base + i), 4,
@@ -896,6 +923,20 @@ if (!vs || !vs->vfetch_count || !ve)
                fx->attrib, vb->is_user_buffer, vb->buffer.resource,
                e->vertex_buffer_index, e->src_stride);
 
+      if (fx->attrib == 0) {
+         const uint8_t *v0 = vb->is_user_buffer ? vb->buffer.user :
+            (const uint8_t *)xenos_resource(vb->buffer.resource)->data +
+            vb->buffer_offset;
+         DbgPrint("[VBCHECK] elem0 off=%u fmt=%u stride=%u ncomp=%u",
+                  e->src_offset, e->src_format, e->src_stride,
+                  util_format_get_nr_components(e->src_format));
+         for (unsigned k = 0; k < 12; k++) {
+            const float *f = (const float *)(v0 + e->src_offset +
+                                             (uint64_t)k * e->src_stride);
+            DbgPrint("[VBCHECK] v%02u %.3f %.3f %.3f", k, f[0], f[1], f[2]);
+         }
+      }
+
       if (!vb->is_user_buffer && vb->buffer.resource)
          phys = (xenos_resource(vb->buffer.resource)->gpu_addr << 2) +
                 vb->buffer_offset;
@@ -904,12 +945,24 @@ if (!vs || !vs->vfetch_count || !ve)
 
       phys += e->src_offset;
 
-      xe_ucode_vfetch(out, fx->attrib, fx->dst_gpr, XE_UCODE_DST_SWIZ_XYZW,
-                      0, 0, xenos_vfmt(e->src_format),
-                      e->src_stride >> 2, 0, true, true);
-      vs->ucode[fx->ucode_dword + 0] = out[0];
-      vs->ucode[fx->ucode_dword + 1] = out[1];
-      vs->ucode[fx->ucode_dword + 2] = out[2];
+xe_ucode_vfetch(out, fx->attrib, fx->dst_gpr, XE_UCODE_DST_SWIZ_XYZW,
+                       XE_VFETCH_INDEX_GPR_X, 0, xenos_vfmt(e->src_format),
+                       e->src_stride >> 2, 0, true, true);
+       vs->ucode[fx->ucode_dword + 0] = out[0];
+       vs->ucode[fx->ucode_dword + 1] = out[1];
+       vs->ucode[fx->ucode_dword + 2] = out[2];
+
+       /* The z/w bootstrap ALU after the position fetch must only overwrite
+        * lanes the element doesn't provide: 2D keeps z=0,w=1; 3D keeps the
+        * fetched z and writes w=1; 4D needs nothing. */
+       if (fx->attrib == 0 && fx->zw_override != UINT32_MAX) {
+          unsigned nr = util_format_get_nr_components(e->src_format);
+          uint32_t wm = ((uint32_t)nr < 4) << 3;         /* bit 3 = w */
+          if (nr < 3)
+             wm |= 1u << 2;                               /* bit 2 = z */
+          uint32_t d = fx->zw_override;
+          vs->ucode[d] = (vs->ucode[d] & ~(0xFu << 16)) | (wm << 16);
+       }
    }
 
    /* Fetch constant groups: a 2-dword entry per attrib, packed 3 per 6-dword
@@ -971,11 +1024,38 @@ xenos_clear(struct pipe_context *pipe, unsigned buffers,
    if (!buffers || !x->framebuffer.width)
       return;
 
+   /* The color clear is expressed as a fullscreen triangle draw.  Force the
+    * depth state so the clear always writes, regardless of the
+    * currently-bound DSA state:
+    *  - If the application has depth test enabled (LESS) with a real depth
+    *    buffer, the clear triangle would fail the LESS test against stale
+    *    depth, so force zfunc=ALWAYS.
+    *  - When PIPE_CLEAR_DEPTH is requested the clear writes depth too, so
+    *    enable the depth writemask (still ALWAYS, so a stale/deep depth
+    *    buffer can't reject the clear). */
+   bool clear_depth = (buffers & PIPE_CLEAR_DEPTH) != 0;
+   void *saved_dsa = x->dsa;
+   if (!x->dsa_override_active) {
+      x->clear_dsa.depth_enabled = true;
+      x->clear_dsa.depth_writemask = clear_depth;
+      x->clear_dsa.depth_func = PIPE_FUNC_ALWAYS;
+      x->dsa = &x->clear_dsa;
+      x->dsa_override_active = 1;
+   }
    xenos_emit_frame_state(x);
+   if (x->dsa_override_active) {
+      x->dsa = saved_dsa;
+      x->dsa_override_active = 0;
+   }
 
    /* Clear through draws: fullscreen triangle with the minimal shaders
     * (VS covers [-1..3] NDC; PS outputs guest c48 = host bank-256 c48).
-    * Depth clear is not wired yet (no depth test in M1 targets). */
+    * The VS passes the vertex z straight through to clip space, so the NDC
+    * z of the triangle controls the depth value written when the depth
+    * clear is requested: map the requested clear depth (already in window
+    * [0,1] after the GL depth range transform) back through the host's
+    * z_ndc = (z_win - tz) / sz viewport transform.  sz=tz=0.5, so
+    * z_ndc = 2*depth - 1. */
    if (!x->clear_vs_dwords) {
       x->clear_vs_dwords = xe_ucode_build_vs_minimal(x->clear_vs);
       x->clear_ps_dwords = xe_ucode_build_ps_minimal(x->clear_ps);
@@ -996,10 +1076,11 @@ xenos_clear(struct pipe_context *pipe, unsigned buffers,
     * The vertex index comes from the sequencer, stride 16 bytes. The fetch
     * size spans all three vertices (12 words, 48 bytes), not just the first. */
    if (x->clear_vert) {
+      float zc = (float)(2.0 * depth - 1.0);
       float *cv = (float *)x->clear_vert;
-      cv[ 0] = -1.0f; cv[ 1] = -1.0f; cv[ 2] = 0.0f; cv[ 3] = 1.0f;
-      cv[ 4] =  3.0f; cv[ 5] = -1.0f; cv[ 6] = 0.0f; cv[ 7] = 1.0f;
-      cv[ 8] = -1.0f; cv[ 9] =  3.0f; cv[10] = 0.0f; cv[11] = 1.0f;
+      cv[ 0] = -6.0f; cv[ 1] = -6.0f; cv[ 2] = zc; cv[ 3] = 1.0f;
+      cv[ 4] =  6.0f; cv[ 5] = -6.0f; cv[ 6] = zc; cv[ 7] = 1.0f;
+      cv[ 8] = -6.0f; cv[ 9] =  6.0f; cv[10] = zc; cv[11] = 1.0f;
       xenos_vertex_fetch vf = { 0 };
       xe_gpu_vfetch_build(&vf, x->clear_vert_phys, 48u, XE_ENDIAN_8IN32);
       ctx_reserve(x, 3);
@@ -1315,6 +1396,12 @@ xenos_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    DbgPrint("xenos: context_create enter");
    if (!x)
       return NULL;
+
+   /* Depth-disabled DSA state used to force the color-clear draw past any
+    * bound depth-test state (see xenos_clear). */
+   x->clear_dsa.depth_enabled = false;
+   x->clear_dsa.depth_writemask = false;
+   x->clear_dsa.depth_func = PIPE_FUNC_ALWAYS;
 
    x->screen = xenos_screen(screen);
    DbgPrint("xenos: ctx screen ok");

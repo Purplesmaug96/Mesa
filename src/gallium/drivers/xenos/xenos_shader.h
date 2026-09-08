@@ -25,10 +25,19 @@ struct nir_shader;
  * only records which slot fetched which vertex attrib. */
 struct xenos_vfetch_fixup
 {
-   uint32_t ucode_dword; /* dword index of the slot's first dword */
-   uint32_t attrib;      /* fetch-constant / vbuf slot index */
-   uint32_t dst_gpr;     /* GPR the fetch writes */
+   uint32_t ucode_dword;   /* dword index of the slot's first dword */
+   uint32_t attrib;        /* fetch-constant / vbuf slot index */
+   uint32_t dst_gpr;       /* GPR the fetch writes */
+   uint32_t zw_override;   /* dword0 of the z/w-comp bootstrap ALU, UINT32_MAX
+                              if none; write mask patched per element comps */
 };
+
+/* On Xenos the vertex index lands in r0.x (auto-injected at VS entry).
+ * The position fetch typically targets r0 as its destination, which
+ * overwrites the index before any subsequent fetch can use it.  To avoid
+ * this we copy r0.x into a reserved GPR at the start of the VS and source
+ * every vfetch's index from that GPR.  No ALU or fetch may touch GPR 62. */
+#define XE_VFETCH_INDEX_GPR_X  62u
 
 /* An opaque compiled Xenos shader: CF pair + vfetch/ALU slots + the metadata
  * the draw path needs (GPR counts, uniform/const count, interpolator

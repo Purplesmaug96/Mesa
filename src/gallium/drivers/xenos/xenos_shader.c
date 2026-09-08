@@ -50,6 +50,8 @@ extern void DbgPrint(const char *fmt, ...);
 #define XE_MAX_SLOTS         ((XE_MAX_UCODE_DWORDS - 3) / 3)
 #define XE_HELPER_CONST_BASE 252u /* 0.0, 1.0, -1.0, 0.5 */
 
+
+
 /* One relocated operand: a temp GPR or a float constant.  Field layout
  * matches xe_ucode_alu_src so operands can be assigned straight into ALU
  * src slots. */
@@ -84,6 +86,7 @@ struct xe_cctx
    struct xenos_vfetch_fixup vfetch[16];
    uint32_t vfetch_count;
    uint32_t next_fetch_slot; /* consecutive fetch-constant slot index */
+   bool index_gpr_emitted;   /* indexed fetch source (r62.x) emitted yet */
 
    bool failed;
 };
@@ -275,14 +278,30 @@ xe_emit_scalar_op(struct xe_cctx *c, uint32_t scalar_opc, uint32_t dst_gpr,
    }
 }
 
+/* Lazily copy the auto-injected vertex index from r0.x into the reserved
+ * index GPR, before any vfetch.  Emitted once, at the first fetch.  The
+ * floor below keeps the value an exact integer, so a later fetch whose index
+ * arithmetic re-reads r62 is unaffected. */
+static void
+xe_emit_vindex_save(struct xe_cctx *c)
+{
+   if (c->index_gpr_emitted || c->failed)
+      return;
+   c->index_gpr_emitted = true;
+   xe_emit_mov(c, XE_VFETCH_INDEX_GPR_X, 0x1,
+               &(xe_ucode_alu_src){ true, 0, 0, false }); /* r0.x -> r62.x */
+}
+
 static void
 xe_vfetch(struct xe_cctx *c, uint32_t attrib, uint32_t dst_gpr)
 {
    uint32_t slot[3];
    /* Format/stride/offset are patched at draw time; use 4x float32 + zero
-    * stride here. */
+    * stride here.  Index source is the reserved r62.x copy of the vertex
+    * index, NOT r0 (whose value the position fetch below will overwrite). */
+   xe_emit_vindex_save(c);
    xe_ucode_vfetch(slot, attrib, dst_gpr, XE_UCODE_DST_SWIZ_XYZW,
-                   0 /* r0.x = auto vertex index */, 0,
+                   XE_VFETCH_INDEX_GPR_X, 0 /* r62.x = saved vertex index */,
                    XE_UCODE_FORMAT_32_32_32_32_FLOAT, 0, 0, true, true);
     uint32_t slot_idx = c->num_slots;
     if (c->vfetch_count < 16) {
@@ -364,17 +383,23 @@ xe_emit_vs_vfetch(struct xe_cctx *c, nir_intrinsic_instr *intr)
       c->max_gpr = gpr + 1;
    if (gpr >= c->next_temp_gpr)
       c->next_temp_gpr = gpr + 1;
-   uint32_t fetch_slot = c->next_fetch_slot++; /* consecutive slot */
-   xe_vfetch(c, fetch_slot, gpr);
-   /* Fixed-function position is declared vec4 but the vertex element often
-    * carries only 2D components (glVertex2f).  Ensure z=0, w=1 so the MVP
-    * divide-by-w stays finite. */
-   if (attrib == 0) {
-      float zw[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-      uint32_t k = xe_add_const(c, zw, 4);
-      xe_emit_mov(c, gpr, 0xC, &(xe_ucode_alu_src){ false, k,
-                      XE_UCODE_ALU_SWIZ_XYZW, false });
-   }
+uint32_t fetch_slot = c->next_fetch_slot++; /* consecutive slot */
+    xe_vfetch(c, fetch_slot, gpr);
+    /* Fixed-function position is declared vec4 but the vertex element may
+     * carry only 2D or 3D components.  Bootstrap the missing lanes so the
+     * MVP divide-by-w stays finite: w=1 always, and z=0 only when the
+     * element lacks a z (2 components); the write mask of this slot is
+     * patched per-draw in xenos_patch_vfetch from the element format. */
+    if (attrib == 0) {
+       float zw[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+       uint32_t k = xe_add_const(c, zw, 4);
+       uint32_t mov_slot_idx = c->num_slots;
+       xe_emit_mov(c, gpr, 0xC, &(xe_ucode_alu_src){ false, k,
+                       XE_UCODE_ALU_SWIZ_XYZW, false });
+       if (c->vfetch_count > 0)
+          c->vfetch[c->vfetch_count - 1].zw_override =
+             3 + 3 * mov_slot_idx;
+    }
    xe_def_set(c, &intr->def, (xe_ucode_alu_src){ true, gpr,
                XE_UCODE_ALU_SWIZ_XYZW, false });
 }
@@ -707,6 +732,8 @@ free(c.defs);
       if (c.next_temp_gpr == 0)
          c.next_temp_gpr = 1; /* at least 1 GPR */
       c.max_gpr = MAX2(c.max_gpr, c.next_temp_gpr);
+      /* Bump max_gpr so num_gprs covers the reserved vfetch-index GPR. */
+      c.max_gpr = MAX2(c.max_gpr, XE_VFETCH_INDEX_GPR_X + 1);
    }
 
    if (!c.failed) {
@@ -746,8 +773,11 @@ free(c.defs);
        * dwords.  Otherwise xenos_patch_vfetch would overwrite the later CF
        * pair with vfetch data. */
       if (num_blocks > 1) {
-         for (uint32_t f = 0; f < c.vfetch_count; ++f)
+         for (uint32_t f = 0; f < c.vfetch_count; ++f) {
             c.vfetch[f].ucode_dword += 3 * (num_blocks - 1);
+            if (c.vfetch[f].zw_override != UINT32_MAX)
+               c.vfetch[f].zw_override += 3 * (num_blocks - 1);
+         }
       }
       uint32_t slot_index = 0;
       for (uint32_t block = 0; block < num_blocks; block++) {

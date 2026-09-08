@@ -163,6 +163,14 @@ typedef union xenos_rb_depth_info {
 #define XE_VTE_VPORT_Z_SCALE_ENA   (1u << 4)
 #define XE_VTE_VPORT_Z_OFFSET_ENA  (1u << 5)
 
+/* PA_CL_VTE_CNTL vertex format bits.  The guest xenos VS exports GCN-style
+ * clip-space XYZ and the true W0 (not pre-divided by W, not 1/W).  Tell the
+ * host that: vtx_w0_fmt=1 means W0 is real W (host reciprocates it), and
+ * vtx_xy_fmt/vtx_z_fmt=0 mean XYZ are raw clip coords (host divides by W). */
+#define XE_VTE_VTX_XY_FMT          (1u << 8)
+#define XE_VTE_VTX_Z_FMT           (1u << 9)
+#define XE_VTE_VTX_W0_FMT          (1u << 10)
+
 /* PA_CL_CLIP_CNTL: clip_disable (bit 16) */
 #define XE_CLIP_DISABLE            (1u << 16)
 
