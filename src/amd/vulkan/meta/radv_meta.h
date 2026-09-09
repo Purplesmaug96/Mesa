@@ -28,6 +28,25 @@
 extern "C" {
 #endif
 
+/* Codepath selection for framebuffer clears, image clears, copies, blits, and MSAA resolves.
+ * It has no effect on transfer queues. Compute queues ignore the fragment option.
+ */
+enum radv_image_meta_path {
+   /* Use the default path. */
+   RADV_IMAGE_META_PATH_AUTO,
+
+   /* Use fragment shaders when possible. Don't use fast clear. */
+   RADV_IMAGE_META_PATH_FRAGMENT,
+
+   /* Use compute shaders when possible. Don't use fast clear. */
+   RADV_IMAGE_META_PATH_COMPUTE,
+
+   /* Use fast clears for clears when possible. (fast clear might not always be used by default)
+    * Other ops use the default path.
+    */
+   RADV_IMAGE_META_PATH_FAST_CLEAR,
+};
+
 enum radv_meta_save_flags {
    RADV_META_SAVE_CONSTANTS = (1 << 0),
    RADV_META_SAVE_DESCRIPTOR_BUFFER_ADDR0 = (1 << 1),
@@ -64,11 +83,11 @@ enum radv_meta_object_key_type {
    RADV_META_OBJECT_KEY_CLEAR_DS,
    RADV_META_OBJECT_KEY_CLEAR_HTILE,
    RADV_META_OBJECT_KEY_CLEAR_DCC_COMP_TO_SINGLE,
-   RADV_META_OBJECT_KEY_CLEAR_HIZ,
+   RADV_META_OBJECT_KEY_CLEAR_HIZ_CS,
    RADV_META_OBJECT_KEY_FAST_CLEAR_ELIMINATE,
    RADV_META_OBJECT_KEY_DCC_DECOMPRESS,
    RADV_META_OBJECT_KEY_DCC_DECOMPRESS_CS,
-   RADV_META_OBJECT_KEY_DCC_RETILE,
+   RADV_META_OBJECT_KEY_DCC_RETILE_CS,
    RADV_META_OBJECT_KEY_HTILE_EXPAND_GFX,
    RADV_META_OBJECT_KEY_HTILE_EXPAND_CS,
    RADV_META_OBJECT_KEY_FMASK_COPY,
@@ -320,6 +339,8 @@ uint32_t radv_clear_htile(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 
 uint32_t radv_clear_hiz(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
                         const VkImageSubresourceRange *range, uint32_t value);
+void radv_expand_hiz_range(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
+                           const VkImageSubresourceRange *subresourceRange);
 
 void radv_update_memory_cp(struct radv_cmd_buffer *cmd_buffer, uint64_t va, const void *data, uint64_t size);
 

@@ -740,7 +740,11 @@ anv_init_update_scratch(VkCommandBuffer commandBuffer,
       struct update_scratch_layout layout;
       anv_get_update_scratch_layout(device, state, &layout);
 
-      anv_cmd_fill_buffer_addr(commandBuffer, scratch, layout.size, 0x0);
+      /* The update shader writes every AABB before reading it.  Only the
+       * arrival counters need to be initialized.
+       */
+      anv_cmd_fill_buffer_addr(commandBuffer, scratch, layout.aabb_offset,
+                               0x0);
    }
 }
 
@@ -788,7 +792,7 @@ anv_update_as(VkCommandBuffer commandBuffer, struct vk_device *vk_device,
    }
 
    if (barrier_needed)
-         vk_bvh_build_barrier_compute_to_compute(commandBuffer, false);
+      vk_bvh_build_barrier_transfer_to_compute(commandBuffer);
 
    for (uint32_t i = 0; i < build_count; i++) {
       struct vk_acceleration_structure_build_state *state = &states[i];

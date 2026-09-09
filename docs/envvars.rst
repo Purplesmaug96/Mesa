@@ -927,8 +927,6 @@ Anvil(ANV) driver environment variables
 
   Accepts the following comma-separated list of flags:
 
-  ``bindless``
-    Forces all descriptor sets to use the internal :ref:`Bindless model`
   ``desc-dirty``
     Print out what dirties descriptors
   ``experimental``
@@ -1588,7 +1586,7 @@ RADV driver environment variables
 .. envvar:: RADV_FORCE_VRS_CONFIG_FILE
 
    similar to ``RADV_FORCE_VRS`` but allow to configure from a file. If present,
-   this supersedes ``RADV_FORCE_VRS``.
+   this supersedes ``RADV_FORCE_VRS``. This only affects GFX10.3 APUs.
 
 .. envvar:: RADV_PERFTEST
 

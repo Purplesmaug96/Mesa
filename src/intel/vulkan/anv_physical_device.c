@@ -92,9 +92,13 @@ anv_physical_device_init_drirc(struct anv_physical_device *device)
 
    device->drirc_status = VK_SUCCESS;
 
+   char verx10_str[16];
+   snprintf(verx10_str, sizeof(verx10_str), "%u", device->info.verx10);
+
    anv_parse_dri_options(&device->drirc,
                          &(driConfigFileParseParams) {
                             .driverName = "anv",
+                            .deviceVersion = verx10_str,
                             .applicationName = instance->vk.app_info.app_name,
                             .applicationVersion = instance->vk.app_info.app_version,
                             .engineName = instance->vk.app_info.engine_name,
@@ -336,6 +340,9 @@ get_device_extensions(const struct anv_physical_device *device,
                                      ANV_DEBUG(VIDEO_ENCODE);
    const bool video_decode_enabled = ANV_DEBUG(VIDEO_DECODE);
 
+   if (VIDEO_CODEC_H265DEC && video_decode_enabled && !device->has_huc)
+      debug_warn_once("HuC firmware is not loaded, disabling H.265 video decoding");
+
    *ext = (struct vk_device_extension_table) {
       .KHR_8bit_storage                      = true,
       .KHR_16bit_storage                     = !device->drirc.debug.no_16bit,
@@ -453,7 +460,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_video_queue                       = video_decode_enabled || video_encode_enabled,
       .KHR_video_decode_queue                = video_decode_enabled,
       .KHR_video_decode_h264                 = VIDEO_CODEC_H264DEC && video_decode_enabled,
-      .KHR_video_decode_h265                 = VIDEO_CODEC_H265DEC && video_decode_enabled,
+      .KHR_video_decode_h265                 = VIDEO_CODEC_H265DEC && video_decode_enabled && device->has_huc,
       .KHR_video_decode_av1                  = device->info.ver >= 12 && VIDEO_CODEC_AV1DEC && video_decode_enabled,
       .KHR_video_decode_vp9                  = VIDEO_CODEC_VP9DEC && video_decode_enabled,
       .KHR_video_encode_queue                = video_encode_enabled,
@@ -1102,7 +1109,7 @@ get_features(const struct anv_physical_device *pdevice,
       .cooperativeMatrix = pdevice->has_cooperative_matrix,
 
       /* VK_NV_cooperative_matrix2 */
-      .cooperativeMatrixPerElementOperations = pdevice->has_cooperative_matrix,
+      .cooperativeMatrixPerElementOperationsNV = pdevice->has_cooperative_matrix,
 
       /* VK_KHR_shader_maximal_reconvergence */
       .shaderMaximalReconvergence = true,
@@ -1292,19 +1299,6 @@ get_features(const struct anv_physical_device *pdevice,
 #define MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS   64
 
 #define MAX_PER_STAGE_DESCRIPTOR_INPUT_ATTACHMENTS 64
-
-static VkDeviceSize
-anx_get_physical_device_max_heap_size(const struct anv_physical_device *pdevice)
-{
-   VkDeviceSize ret = 0;
-
-   for (uint32_t i = 0; i < pdevice->memory.heap_count; i++) {
-      if (pdevice->memory.heaps[i].size > ret)
-         ret = pdevice->memory.heaps[i].size;
-   }
-
-   return ret;
-}
 
 static void
 get_properties_1_1(const struct anv_physical_device *pdevice,
@@ -1556,8 +1550,6 @@ get_properties(const struct anv_physical_device *pdevice,
    if (!os_get_page_size(&page_size))
       page_size = 4096;         /* fallback */
 
-   const VkDeviceSize max_heap_size = anx_get_physical_device_max_heap_size(pdevice);
-
    const uint32_t max_workgroup_size =
       MIN2(1024, 32 * devinfo->max_cs_workgroup_threads);
 
@@ -1593,8 +1585,10 @@ get_properties(const struct anv_physical_device *pdevice,
       .maxImageArrayLayers                      = (1 << 11),
       .maxTexelBufferElements                   = 128 * 1024 * 1024,
 
-      .maxUniformBufferRange                    = intel_indirect_ubos_use_sampler(devinfo) ? (1u << 27) : (1u << 30),
-      .maxStorageBufferRange                    = MIN3(pdevice->isl_dev.max_buffer_size, max_heap_size, UINT32_MAX),
+      .maxUniformBufferRange                    = MIN2(intel_indirect_ubos_use_sampler(devinfo) ?
+                                                       (1u << 27) : pdevice->isl_dev.max_buffer_size,
+                                                       UINT32_MAX),
+      .maxStorageBufferRange                    = MIN2(pdevice->isl_dev.max_buffer_size, UINT32_MAX),
       .maxPushConstantsSize                     = MAX_PUSH_CONSTANTS_SIZE,
       .maxMemoryAllocationCount                 = UINT32_MAX,
       .maxSamplerAllocationCount                = 64 * 1024,
@@ -1997,21 +1991,36 @@ get_properties(const struct anv_physical_device *pdevice,
       props->robustStorageBufferDescriptorSize = ANV_SURFACE_STATE_SIZE;
       props->inputAttachmentDescriptorSize = ANV_SURFACE_STATE_SIZE;
       props->accelerationStructureDescriptorSize = sizeof(struct anv_address_range_descriptor);
-      props->maxSamplerDescriptorBufferRange = anv_physical_device_get_dynamic_visible_pool_va(pdevice)->size;
-      props->maxResourceDescriptorBufferRange = anv_physical_device_bindless_heap_size(pdevice,
-                                                                                       true);
-      props->resourceDescriptorBufferAddressSpaceSize = anv_physical_device_get_dynamic_visible_pool_va(pdevice)->size;
-      props->descriptorBufferAddressSpaceSize = anv_physical_device_get_dynamic_visible_pool_va(pdevice)->size;
-      props->samplerDescriptorBufferAddressSpaceSize = anv_physical_device_get_dynamic_visible_pool_va(pdevice)->size;
+
+      if (pdevice->uses_efficient_64bit) {
+         props->maxSamplerDescriptorBufferRange = pdevice->va.bindless_surface_state_pool.size;
+         props->maxResourceDescriptorBufferRange = pdevice->va.bindless_surface_state_pool.size;
+         props->resourceDescriptorBufferAddressSpaceSize = pdevice->va.bindless_surface_state_pool.size;
+         props->descriptorBufferAddressSpaceSize = pdevice->va.bindless_surface_state_pool.size;
+         props->samplerDescriptorBufferAddressSpaceSize = pdevice->va.bindless_surface_state_pool.size;
+      } else {
+         props->maxSamplerDescriptorBufferRange =
+            anv_physical_device_get_dynamic_visible_pool_va(pdevice)->size;
+         props->maxResourceDescriptorBufferRange =
+            anv_physical_device_bindless_heap_size(pdevice, true);
+         props->resourceDescriptorBufferAddressSpaceSize =
+            anv_physical_device_get_dynamic_visible_pool_va(pdevice)->size;
+         props->descriptorBufferAddressSpaceSize =
+            anv_physical_device_get_dynamic_visible_pool_va(pdevice)->size;
+         props->samplerDescriptorBufferAddressSpaceSize =
+            anv_physical_device_get_dynamic_visible_pool_va(pdevice)->size;
+      }
    }
 
    /* VK_EXT_descriptor_heap */
    {
       props->samplerHeapAlignment = 64;
       props->resourceHeapAlignment = 64;
-      props->maxSamplerHeapSize = pdevice->va.dynamic_visible_pool.size;
-      props->maxResourceHeapSize = anv_physical_device_bindless_heap_size(pdevice,
-                                                                          true);
+      props->maxSamplerHeapSize = pdevice->uses_efficient_64bit ?
+         anv_physical_device_bindless_heap_size(pdevice, true) :
+         pdevice->va.dynamic_visible_pool.size;
+      props->maxResourceHeapSize =
+         anv_physical_device_bindless_heap_size(pdevice, true);
       props->minSamplerHeapReservedRange = 0;
       props->minSamplerHeapReservedRangeWithEmbedded = 0;
       props->minResourceHeapReservedRange = 0;
@@ -2723,7 +2732,7 @@ anv_physical_device_init_uuids(struct anv_physical_device *device)
    _mesa_blake3_init(&blake3_ctx);
    _mesa_blake3_update(&blake3_ctx, build_id_data(note), build_id_len);
    brw_device_blake3_update(&blake3_ctx, &device->info);
-   bool always_use_bindless = ANV_DEBUG(BINDLESS);
+   bool always_use_bindless = device->drirc.features.always_bindless;
    _mesa_blake3_update(&blake3_ctx, &always_use_bindless,
                      sizeof(always_use_bindless));
    _mesa_blake3_final(&blake3_ctx, blake3);
@@ -3089,6 +3098,8 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    device->has_protected_contexts = device->info.ver >= 12 &&
       intel_gem_supports_protected_context(fd, device->info.kmd_type);
 
+   device->has_huc = intel_gem_supports_huc(fd, device->info.kmd_type);
+
    /* Just pick one; they're all the same */
    device->has_astc_ldr =
       isl_format_supports_sampling(&device->info,
@@ -3170,6 +3181,10 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    device->indirect_descriptors =
       !intel_has_extended_bindless(&devinfo) ||
       device->drirc.debug.force_indirect_descriptors;
+
+   device->uses_efficient_64bit =
+      device->info.verx10 >= 350 &&
+      device->drirc.debug.enable_efficient_64bit;
 
    device->alloc_aux_tt_mem =
       device->info.has_aux_map && device->info.verx10 >= 125;

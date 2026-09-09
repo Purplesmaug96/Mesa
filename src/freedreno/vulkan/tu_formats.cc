@@ -151,9 +151,7 @@ tu_physical_device_get_format_properties(
       out_properties->optimalTilingFeatures = optimal;
       out_properties->bufferFeatures =
          VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_BIT |
-         VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_ATOMIC_BIT |
-         VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
-         VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+         VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_ATOMIC_BIT;
       return;
    }
 
@@ -167,10 +165,6 @@ tu_physical_device_get_format_properties(
    /* We never have to spill to memory for MSRTSS. */
    if (msrtss_out)
       msrtss_out->optimal = true;
-
-   /* We don't support BufferToImage/ImageToBuffer for npot formats */
-   if (!is_npot)
-      buffer |= VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
 
    if (supported_vtx)
       buffer |= VK_FORMAT_FEATURE_2_VERTEX_BUFFER_BIT;
@@ -363,8 +357,15 @@ tu_physical_device_get_format_properties(
     *    VK_IMAGE_TYPE_2D
     *    [...]
     *    bufferFeatures must not support any features for these formats
+    *
+    * additionally, 1.4.349 spec, section 56.2 "Format Properties":
+    *
+    *
+    *     If format is block-compressed, requires sampler Y′CBCR conversion, or is
+    *     a depth/stencil format then bufferFeatures must not support any features
+    *     for the format"
     */
-   if (ycbcr_info || vk_format_is_depth_or_stencil(vk_format))
+   if (ycbcr_info || vk_format_is_depth_or_stencil(vk_format) || vk_format_is_compressed(vk_format))
       buffer = 0;
 
    /* D32_SFLOAT_S8_UINT is tiled as two images, so no linear format */
@@ -586,6 +587,9 @@ tu_get_image_format_properties(
    }
 
    if (info->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) {
+      if (!(physical_device->has_sparse_prr && physical_device->info->props.ubwc_all_formats_compatible))
+         return tu_image_unsupported_format(pImageFormatProperties);
+
       /* Don't support multi-planar formats with sparse yet */
       if (vk_format_get_plane_count(info->format) > 1)
          return tu_image_unsupported_format(pImageFormatProperties);
@@ -641,7 +645,9 @@ tu_get_image_format_properties(
         (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
          VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
        !(info->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) &&
-       !(info->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+       !(info->usage & (VK_IMAGE_USAGE_STORAGE_BIT |
+                        VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT |
+                        VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR))) {
       sampleCounts |= VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
 
       /* a7xx supports 8x MSAA except for 128-bit formats. */

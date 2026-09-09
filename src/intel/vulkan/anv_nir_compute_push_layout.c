@@ -72,6 +72,20 @@ adjust_driver_push_values(nir_shader *nir,
          assert(anv_drv_const_size(drv_data.gfx.wa_18019110168) <= 4);
          BITSET_SET(data->push_dwords, fs_per_prim_remap_start / 4);
       }
+
+      if (push_info->use_fs_color_offset) {
+         const uint32_t fs_color_offset_start =
+            anv_drv_const_offset(drv_data.gfx.fs_color_offset);
+         assert(anv_drv_const_size(drv_data.gfx.fs_color_offset) <= 4);
+         BITSET_SET(data->push_dwords, fs_color_offset_start / 4);
+      }
+
+      if (push_info->use_fs_color_map) {
+         const uint32_t fs_color_map_start =
+            anv_drv_const_offset(drv_data.gfx.fs_color_map);
+         assert(anv_drv_const_size(drv_data.gfx.fs_color_map) <= 4);
+         BITSET_SET(data->push_dwords, fs_color_map_start / 4);
+      }
    }
 
    if (nir->info.stage == MESA_SHADER_MESH &&
@@ -391,17 +405,40 @@ lower_to_inline_data_intel(nir_builder *b,
     * is just packed into the inline data, the order is the same (it's just
     * packed), so even if the value is a vec3/4, once you find the first
     * matching dword, the rest will follow in the right order.
+    *
+    * The push data should be aligned to the data type (8/16/32/64 bits), but
+    * when we repack things into the inline register, we work with dwords.
+    * This means a 64bit could end up being unaligned. Deal with that case
+    * here so we don't have to add a complicated pass in the backend.
     */
    for (unsigned i = 0; i < state->bind_map->inline_dwords_count; i++) {
       if (state->bind_map->inline_dwords[i] == base / 4) {
          b->cursor = nir_before_instr(&intrin->instr);
-         nir_def *data = nir_load_inline_data_intel(
-            b,
-            intrin->def.num_components,
-            intrin->def.bit_size,
-            intrin->src[0].ssa,
-            .base = i * 4 + base % 4,
-            .range = nir_intrinsic_range(intrin));
+         const unsigned load_base = i * 4 + base % 4;
+         nir_def *data;
+         if (intrin->def.bit_size == 64 && load_base % 8 != 0) {
+            nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+            const unsigned range_per_comp = nir_intrinsic_range(intrin) / intrin->def.num_components;
+            for (unsigned c = 0; c < intrin->def.num_components; c++) {
+               comps[c] = nir_pack_64_2x32(
+                  b, nir_load_inline_data_intel(
+                     b,
+                     intrin->def.num_components * 2,
+                     intrin->def.bit_size / 2,
+                     intrin->src[0].ssa,
+                     .base = load_base + c * range_per_comp,
+                     .range = range_per_comp));
+            }
+            data = nir_vec(b, comps, intrin->def.num_components);
+         } else {
+            data = nir_load_inline_data_intel(
+               b,
+               intrin->def.num_components,
+               intrin->def.bit_size,
+               intrin->src[0].ssa,
+               .base = load_base,
+               .range = nir_intrinsic_range(intrin));
+         }
          nir_def_replace(&intrin->def, data);
          return true;
       }

@@ -23,6 +23,7 @@
 #include "vk_util.h"
 #include "vk_log.h"
 
+#include "hwdef/pvr_hw_utils.h"
 #include "hwdef/rogue_hw_utils.h"
 
 #include "pco/pco.h"
@@ -168,6 +169,7 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float_controls = true,
+      .KHR_shader_float_controls2 = true,
       .KHR_shader_fma = true,
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_non_semantic_info = true,
@@ -381,6 +383,9 @@ static void pvr_physical_device_get_supported_features(
 
       /* Vulkan 1.2 / VK_KHR_separate_depth_stencil_layouts */
       .separateDepthStencilLayouts = true,
+
+      /* Vulkan 1.4 / VK_KHR_shader_float_controls2 */
+      .shaderFloatControls2 = true,
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
@@ -645,7 +650,7 @@ static bool pvr_physical_device_get_properties(
 
       .maxImageDimension1D = 4096U,
       .maxImageDimension2D = 4096U,
-      .maxImageDimension3D = 256U,
+      .maxImageDimension3D = pvr_get_texture_extent_max_z(dev_info),
       .maxImageDimensionCube = 4096U,
       .maxImageArrayLayers = rogue_get_render_size_max_z(dev_info),
       .maxTexelBufferElements = 64U * 1024U,
@@ -1099,6 +1104,7 @@ static bool pvr_device_is_conformant(const struct pvr_device_info *info)
 {
    const uint64_t bvnc = pvr_get_packed_bvnc(info);
    switch (bvnc) {
+   case PVR_BVNC_PACK(36, 52, 104, 182):
    case PVR_BVNC_PACK(36, 53, 104, 796):
       return true;
 

@@ -25,6 +25,7 @@
 #include "tu_image.h"
 #include "tu_knl.h"
 #include "tu_perfetto.h"
+#include "tu_scratch_ram.h"
 #include "tu_subsampled_image.h"
 #include "tu_tile_config.h"
 #include "tu_tracepoints.h"
@@ -240,11 +241,15 @@ tu6_lazy_init_vsc(struct tu_cmd_buffer *cmd)
    uint32_t vsc_draw_overflow = global->vsc_draw_overflow;
    uint32_t vsc_prim_overflow = global->vsc_prim_overflow;
 
-   if (vsc_draw_overflow >= dev->vsc_draw_strm_pitch)
+   if (vsc_draw_overflow >= dev->vsc_draw_strm_pitch) {
       dev->vsc_draw_strm_pitch = (dev->vsc_draw_strm_pitch - VSC_PAD) * 2 + VSC_PAD;
+      perf_debug(cmd->device, "VSC draw stream overflow, increasing pitch to %u", dev->vsc_draw_strm_pitch);
+   }
 
-   if (vsc_prim_overflow >= dev->vsc_prim_strm_pitch)
+   if (vsc_prim_overflow >= dev->vsc_prim_strm_pitch) {
       dev->vsc_prim_strm_pitch = (dev->vsc_prim_strm_pitch - VSC_PAD) * 2 + VSC_PAD;
+      perf_debug(cmd->device, "VSC prim stream overflow, increasing pitch to %u", dev->vsc_prim_strm_pitch);
+   }
 
    cmd->vsc_prim_strm_pitch = dev->vsc_prim_strm_pitch;
    cmd->vsc_draw_strm_pitch = dev->vsc_draw_strm_pitch;
@@ -1369,13 +1374,13 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
                      tu_autotune::rp_key_opt rp_key)
 {
    if (TU_DEBUG(SYSMEM)) {
-      cmd->state.rp.gmem_disable_reason = "TU_DEBUG(SYSMEM)";
+      cmd->state.rp.force_render_mode_reason = "TU_DEBUG(SYSMEM)";
       return true;
    }
 
    /* can't fit attachments into gmem */
    if (!cmd->state.tiling->possible) {
-      cmd->state.rp.gmem_disable_reason = "Can't fit attachments into gmem";
+      cmd->state.rp.force_render_mode_reason = "Can't fit attachments into gmem";
       return true;
    }
 
@@ -1384,23 +1389,23 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
       for (unsigned i = 0; i < tu_fdm_num_layers(cmd); i++) {
          if (cmd->state.render_areas[i].extent.width == 0 ||
              cmd->state.render_areas[i].extent.height == 0) {
-            cmd->state.rp.gmem_disable_reason = "Render area is empty";
+            cmd->state.rp.force_render_mode_reason = "Render area is empty";
             return true;
          }
       }
    } else if (cmd->state.render_areas[0].extent.width == 0 ||
               cmd->state.render_areas[0].extent.height == 0) {
-      cmd->state.rp.gmem_disable_reason = "Render area is empty";
+      cmd->state.rp.force_render_mode_reason = "Render area is empty";
       return true;
    }
 
    if (cmd->state.rp.has_tess) {
-      cmd->state.rp.gmem_disable_reason = "Uses tessellation shaders";
+      cmd->state.rp.force_render_mode_reason = "Uses tessellation shaders";
       return true;
    }
 
    if (cmd->state.rp.disable_gmem) {
-      /* gmem_disable_reason is set where disable_gmem is set. */
+      /* force_render_mode_reason is set where disable_gmem is set. */
       return true;
    }
 
@@ -1408,7 +1413,7 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
 
    /* XFB is incompatible with non-hw binning GMEM rendering, see use_hw_binning */
    if (cmd->state.rp.xfb_used && !vsc->binning_possible) {
-      cmd->state.rp.gmem_disable_reason =
+      cmd->state.rp.force_render_mode_reason =
          "XFB is incompatible with non-hw binning GMEM rendering";
       return true;
    }
@@ -1419,29 +1424,27 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
    if ((cmd->state.rp.has_prim_generated_query_in_rp ||
         cmd->state.prim_generated_query_running_before_rp) &&
        !vsc->binning_possible) {
-      cmd->state.rp.gmem_disable_reason =
+      cmd->state.rp.force_render_mode_reason =
          "QUERY_TYPE_PRIMITIVES_GENERATED is incompatible with non-hw binning GMEM rendering";
       return true;
    }
 
    if (TU_DEBUG(GMEM)) {
-      cmd->state.rp.gmem_disable_reason = "TU_DEBUG(GMEM)";
+      cmd->state.rp.force_render_mode_reason = "TU_DEBUG(GMEM)";
       return false;
    }
 
    /* This is a case where it's better to avoid GMEM, too many tiles but no HW binning possible. */
    if (!vsc->binning_possible && vsc->binning_useful) {
-      cmd->state.rp.gmem_disable_reason = "Too many tiles and HW binning is not possible";
+      cmd->state.rp.force_render_mode_reason =
+         "Too many tiles and HW binning is not possible";
       return true;
    }
 
    tu_autotune::render_mode optimal_mode =
       cmd->device->autotune->get_optimal_mode(cmd, rp_ctx, rp_key);
-   bool use_sysmem = optimal_mode == tu_autotune::render_mode::SYSMEM;
-   if (use_sysmem)
-      cmd->state.rp.gmem_disable_reason = "Autotune selected sysmem";
 
-   return use_sysmem;
+   return optimal_mode == tu_autotune::render_mode::SYSMEM;
 }
 
 /* Optimization: there is no reason to load gmem if there is no
@@ -1460,8 +1463,8 @@ tu6_emit_cond_for_load_stores(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
        cmd->state.pass->has_cond_load_store) {
       if (CHIP >= A7XX) {
          tu_cs_emit_pkt7(cs, CP_REG_TEST, 1);
-         tu_cs_emit(cs, A6XX_CP_REG_TEST_0_SCRATCH_MEM_OFFSET(pipe) |
-                        A6XX_CP_REG_TEST_0_SOURCE(SOURCE_SCRATCH_MEM) |
+         tu_cs_emit(cs, A6XX_CP_REG_TEST_0_OC_MEM_OFFSET(pipe) |
+                        A6XX_CP_REG_TEST_0_SOURCE(SOURCE_OC_MEM) |
                         A6XX_CP_REG_TEST_0_BIT(slot) |
                         A6XX_CP_REG_TEST_0_SKIP_WAIT_FOR_ME);
       } else {
@@ -2344,10 +2347,9 @@ tu_emit_bin_preamble(struct tu_device *dev, struct tu_cs *cs, bool bv)
    }
 
    if (CHIP == A6XX) {
-      tu_cs_emit_pkt7(cs, CP_MEM_TO_REG, 3);
-      tu_cs_emit(cs, CP_MEM_TO_REG_0_REG(REG_A6XX_VSC_CHANNEL_VISIBILITY(0)) |
-                     CP_MEM_TO_REG_0_CNT(32));
-      tu_cs_emit_qw(cs, dev->global_bo->iova + gb_offset(vsc_state));
+      cs->mem_to_reg(A6XX_VSC_CHANNEL_VISIBILITY_REG(0),
+                     dev->global_bo->iova + gb_offset(vsc_state),
+                     { .cnt = 32 });
    }
 }
 
@@ -2606,25 +2608,19 @@ emit_vsc_overflow_test(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
       vsc->pipe_count.width * vsc->pipe_count.height;
 
    for (int i = 0; i < used_pipe_count; i++) {
-      tu_cs_emit_pkt7(cs, CP_COND_WRITE5, 8);
-      tu_cs_emit(cs, CP_COND_WRITE5_0_FUNCTION(WRITE_GE) |
-            CP_COND_WRITE5_0_WRITE_MEMORY);
-      tu_cs_emit(cs, REG_A6XX_VSC_PIPE_DATA_DRAW_SIZE(i));
-      tu_cs_emit(cs, 0);
-      tu_cs_emit(cs, CP_COND_WRITE5_3_REF(cmd->vsc_draw_strm_pitch - VSC_PAD));
-      tu_cs_emit(cs, CP_COND_WRITE5_4_MASK(~0));
-      tu_cs_emit_qw(cs, global_iova(cmd, vsc_draw_overflow));
-      tu_cs_emit(cs, CP_COND_WRITE5_7_WRITE_DATA(cmd->vsc_draw_strm_pitch));
+      cs->cond_write(tu_gpuva(global_iova(cmd, vsc_draw_overflow)),
+                     A6XX_VSC_PIPE_DATA_DRAW_SIZE_REG(i), {
+                        .function = WRITE_GE,
+                        .ref = cmd->vsc_draw_strm_pitch - VSC_PAD,
+                        .write_data = cmd->vsc_draw_strm_pitch,
+                      });
 
-      tu_cs_emit_pkt7(cs, CP_COND_WRITE5, 8);
-      tu_cs_emit(cs, CP_COND_WRITE5_0_FUNCTION(WRITE_GE) |
-            CP_COND_WRITE5_0_WRITE_MEMORY);
-      tu_cs_emit(cs, REG_A6XX_VSC_PIPE_DATA_PRIM_SIZE(i));
-      tu_cs_emit(cs, 0);
-      tu_cs_emit(cs, CP_COND_WRITE5_3_REF(cmd->vsc_prim_strm_pitch - VSC_PAD));
-      tu_cs_emit(cs, CP_COND_WRITE5_4_MASK(~0));
-      tu_cs_emit_qw(cs, global_iova(cmd, vsc_prim_overflow));
-      tu_cs_emit(cs, CP_COND_WRITE5_7_WRITE_DATA(cmd->vsc_prim_strm_pitch));
+      cs->cond_write(tu_gpuva(global_iova(cmd, vsc_prim_overflow)),
+                     A6XX_VSC_PIPE_DATA_PRIM_SIZE_REG(i), {
+                        .function = WRITE_GE,
+                        .ref = cmd->vsc_prim_strm_pitch - VSC_PAD,
+                        .write_data = cmd->vsc_prim_strm_pitch,
+                      });
    }
 
    tu_cs_emit_pkt7(cs, CP_WAIT_MEM_WRITES, 0);
@@ -3045,8 +3041,9 @@ tu_trace_end_render_pass(struct tu_cmd_buffer *cmd, bool gmem,
          : -1;
    trace_end_render_pass(
       &cmd->trace, &cmd->cs, gmem,
-      cmd->state.rp.gmem_disable_reason ? cmd->state.rp.gmem_disable_reason
-                                        : "",
+      cmd->state.rp.force_render_mode_reason
+         ? cmd->state.rp.force_render_mode_reason
+         : "",
       cmd->state.rp.drawcall_count, avg_per_sample_bandwidth,
       cmd->state.lrz.valid,
       cmd->state.rp.lrz_disable_reason ? cmd->state.rp.lrz_disable_reason
@@ -3699,7 +3696,7 @@ tu6_tile_render_begin(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
             tu_emit_vsc<CHIP>(cmd, cs);
          }
 
-         tu_cs_emit_pkt7(cs, CP_MEM_TO_SCRATCH_MEM, 4);
+         tu_cs_emit_pkt7(cs, CP_MEM_TO_OC_MEM, 4);
          tu_cs_emit(cs, num_vsc_pipes); /* count */
          tu_cs_emit(cs, 0); /* offset */
          tu_emit_vis_stream_patchpoint(cmd, cs, cmd->vsc_state_offset);
@@ -3868,6 +3865,9 @@ tu_emit_subsampled(struct tu_cmd_buffer *cmd,
                    const VkOffset2D *fdm_offsets)
 {
    struct tu_cs *cs = &cmd->cs;
+
+   if (cmd->state.rp.shared_viewport)
+      fdm_offsets = NULL;
 
    for (unsigned i = 0; i < cmd->state.pass->attachment_count; i++) {
       if (i != cmd->state.pass->fragment_density_map.attachment &&
@@ -5273,18 +5273,16 @@ tu_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer,
 
       VK_FROM_HANDLE(tu_buffer, buf, pCounterBuffers[i]);
 
-      tu_cs_emit_pkt7(cs, CP_MEM_TO_REG, 3);
-      tu_cs_emit(cs, CP_MEM_TO_REG_0_REG(VPC_SO_BUFFER_OFFSET(CHIP, idx).reg) |
-                     CP_MEM_TO_REG_0_UNK31 |
-                     CP_MEM_TO_REG_0_CNT(1));
-      tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, counter_buffer_offset));
+      cs->mem_to_reg(VPC_SO_BUFFER_OFFSET(CHIP, idx),
+                     vk_buffer_address(&buf->vk, counter_buffer_offset),
+                     { .cnt = 1, .wait_cache_flush = true });
 
       if (offset) {
-         tu_cs_emit_pkt7(cs, CP_REG_RMW, 3);
-         tu_cs_emit(cs, CP_REG_RMW_0_DST_REG(VPC_SO_BUFFER_OFFSET(CHIP, idx).reg) |
-                        CP_REG_RMW_0_SRC1_ADD);
-         tu_cs_emit(cs, 0xffffffff);
-         tu_cs_emit(cs, offset);
+         cs->rmw(VPC_SO_BUFFER_OFFSET(CHIP, idx), {
+            .src1_add = true,
+            .src0 = 0xffffffff,
+            .src1 = offset,
+         });
       }
    }
 
@@ -5327,26 +5325,19 @@ tu_CmdEndTransformFeedbackEXT(VkCommandBuffer commandBuffer,
       VK_FROM_HANDLE(tu_buffer, buf, pCounterBuffers[i]);
 
       /* VPC_SO_FLUSH_BASE has dwords counter, but counter should be in bytes */
-      tu_cs_emit_pkt7(cs, CP_MEM_TO_REG, 3);
-      tu_cs_emit(cs, CP_MEM_TO_REG_0_REG(tu_scratch_reg<CHIP>(0).reg) |
-                     COND(CHIP == A6XX, CP_MEM_TO_REG_0_SHIFT_BY_2) |
-                     0x40000 | /* ??? */
-                     CP_MEM_TO_REG_0_UNK31 |
-                     CP_MEM_TO_REG_0_CNT(1));
-      tu_cs_emit_qw(cs, global_iova_arr(cmd, flush_base, idx));
+      cs->mem_to_reg(tu_scratch_reg<CHIP>(0), global_iova_arr(cmd, flush_base, idx),
+                     { .one_reg_wr = true, .shift_by_2 = CHIP == A6XX, .wait_cache_flush = true });
 
       if (offset) {
-         tu_cs_emit_pkt7(cs, CP_REG_RMW, 3);
-         tu_cs_emit(cs, CP_REG_RMW_0_DST_REG(tu_scratch_reg<CHIP>(0).reg) |
-                        CP_REG_RMW_0_SRC1_ADD);
-         tu_cs_emit(cs, 0xffffffff);
-         tu_cs_emit(cs, -offset);
+         cs->rmw(tu_scratch_reg<CHIP>(0), {
+            .src1_add = true,
+            .src0 = 0xffffffff,
+            .src1 = -offset,
+         });
       }
 
-      tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
-      tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(tu_scratch_reg<CHIP>(0).reg) |
-                     CP_REG_TO_MEM_0_CNT(1));
-      tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, counter_buffer_offset));
+      cs->reg_to_mem(vk_buffer_address(&buf->vk, counter_buffer_offset),
+                     tu_scratch_reg<CHIP>(0));
    }
 
    tu_cond_exec_end(cs);
@@ -5525,7 +5516,7 @@ tu_pipeline_update_rp_state(struct tu_cmd_state *cmd_state)
          cmd->device,
          "Disabling gmem due to VK_EXT_attachment_feedback_loop_layout");
       cmd_state->rp.disable_gmem = true;
-      cmd_state->rp.gmem_disable_reason =
+      cmd_state->rp.force_render_mode_reason =
          "VK_EXT_attachment_feedback_loop_layout may involve textures";
    }
 
@@ -6253,8 +6244,8 @@ tu_render_pass_state_merge(struct tu_render_pass_state *dst,
       dst->lrz_write_disabled_at_draw =
          dst->drawcall_count + src->lrz_write_disabled_at_draw;
    }
-   if (!dst->gmem_disable_reason && src->gmem_disable_reason) {
-      dst->gmem_disable_reason = src->gmem_disable_reason;
+   if (!dst->force_render_mode_reason && src->force_render_mode_reason) {
+      dst->force_render_mode_reason = src->force_render_mode_reason;
    }
 
    dst->drawcall_count += src->drawcall_count;
@@ -7136,9 +7127,10 @@ tu_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
                              &cmd->state.vk_mv,
                              pass, cmd->state.subpass);
    tu_renderpass_begin(cmd);
-   tu_emit_subpass_begin<CHIP>(cmd);
 
    cmd->patchpoints_ctx = ralloc_context(NULL);
+
+   tu_emit_subpass_begin<CHIP>(cmd);
 }
 TU_GENX(tu_CmdBeginRenderPass2);
 
@@ -8680,7 +8672,7 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
             cmd->device,
             "Disabling gmem due to VK_EXT_attachment_feedback_loop_layout");
          cmd->state.rp.disable_gmem = true;
-         cmd->state.rp.gmem_disable_reason =
+         cmd->state.rp.force_render_mode_reason =
             "MESA_VK_DYNAMIC_ATTACHMENT_FEEDBACK_LOOP_ENABLE";
       }
    }
@@ -9647,13 +9639,9 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
           * In a sequence of indirect dispatches this shouldn't wait for the
           * previous dispatches to finish.
           */
-         tu_cs_emit_pkt7(cs, CP_MEM_TO_REG, 3);
-         tu_cs_emit(cs, CP_MEM_TO_REG_0_REG(SP_CS_NDRANGE_1(CHIP).reg));
-         tu_cs_emit_qw(cs, info->indirect);
+         cs->mem_to_reg(SP_CS_NDRANGE_1(CHIP), info->indirect);
 
-         tu_cs_emit_pkt7(cs, CP_SCRATCH_WRITE, 2);
-         tu_cs_emit(cs, CP_SCRATCH_WRITE_0_SCRATCH(0));
-         tu_cs_emit(cs, ~0u);
+         cs->scratch_write(tu_scratch(tu_dispatch.scratch0), ~0);
 
          /* CP_REG_RMW and CP_REG_TO_SCRATCH implicitly do a CP_WAIT_FOR_IDLE
           * *and* CP_WAIT_FOR_ME, which is a full pipeline stall that we don't
@@ -9666,51 +9654,39 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
           *          = ((~0 & CS_NDRANGE_1) + -1
           *          =  CS_NDRANGE_1 - 1
           */
-         tu_cs_emit_pkt7(cs, CP_REG_RMW, 3);
-         tu_cs_emit(cs,
-                    CP_REG_RMW_0_DST_REG(0) |
-                    CP_REG_RMW_0_DST_SCRATCH |
-                    CP_REG_RMW_0_SKIP_WAIT_FOR_ME |
-                    CP_REG_RMW_0_SRC0_IS_REG |
-                    CP_REG_RMW_0_SRC1_ADD);
-         tu_cs_emit(cs, SP_CS_NDRANGE_1(CHIP).reg); /* SRC0 */
-         tu_cs_emit(cs, -1); /* SRC1 */
+         cs->rmw(tu_scratch(tu_dispatch.scratch0), {
+            .skip_wfm = true,
+            .src1_add = true,
+            .src0 = SP_CS_NDRANGE_1(CHIP),
+            .src1 = -1,
+         });
 
          /* scratch0 = ((scratch0 & (local_size - 1)) rot 2
           *          = ((scratch0 & (local_size - 1)) << 2
           */
-         tu_cs_emit_pkt7(cs, CP_REG_RMW, 3);
-         tu_cs_emit(cs,
-                    CP_REG_RMW_0_DST_REG(0) |
-                    CP_REG_RMW_0_DST_SCRATCH |
-                    CP_REG_RMW_0_SKIP_WAIT_FOR_ME |
-                    CP_REG_RMW_0_ROTATE(A7XX_SP_CS_NDRANGE_7_LOCALSIZEX__SHIFT));
-         tu_cs_emit(cs, local_size[0] - 1); /* SRC0 */
-         tu_cs_emit(cs, 0); /* SRC1 */
+         cs->rmw(tu_scratch(tu_dispatch.scratch0), {
+            .skip_wfm = true,
+            .rotate = A7XX_SP_CS_NDRANGE_7_LOCALSIZEX__SHIFT,
+            .src0 = local_size[0] - 1,
+            .src1 = 0,
+         });
 
          /* write scratch0 to SP_CS_NDRANGE_7 */
-         tu_cs_emit_pkt7(cs, CP_SCRATCH_TO_REG, 1);
-         tu_cs_emit(cs,
-                    CP_SCRATCH_TO_REG_0_REG(SP_CS_NDRANGE_7(CHIP).reg) |
-                    CP_SCRATCH_TO_REG_0_SCRATCH(0));
+         cs->scratch_to_reg(SP_CS_NDRANGE_7(CHIP), tu_scratch(tu_dispatch.scratch0), 1);
 
-         tu_cs_emit_pkt7(cs, CP_SCRATCH_WRITE, 2);
-         tu_cs_emit(cs, CP_SCRATCH_WRITE_0_SCRATCH(0));
-         tu_cs_emit(cs, ~0u);
+         cs->scratch_write(tu_scratch(tu_dispatch.scratch0), ~0);
+
 
          /* scratch0 = (scratch0 & CS_NDRANGE_1) + local_size - 1
           *          = (~0u & CS_NDRANGE_1) + local_size - 1
           *          = CS_NDRANGE_1 + local_size - 1
           */
-         tu_cs_emit_pkt7(cs, CP_REG_RMW, 3);
-         tu_cs_emit(cs,
-                    CP_REG_RMW_0_DST_REG(0) |
-                    CP_REG_RMW_0_DST_SCRATCH |
-                    CP_REG_RMW_0_SKIP_WAIT_FOR_ME |
-                    CP_REG_RMW_0_SRC0_IS_REG |
-                    CP_REG_RMW_0_SRC1_ADD);
-         tu_cs_emit(cs, SP_CS_NDRANGE_1(CHIP).reg); /* SRC0 */
-         tu_cs_emit(cs, local_size[0] - 1); /* SRC1 */
+         cs->rmw(tu_scratch(tu_dispatch.scratch0), {
+            .skip_wfm = true,
+            .src1_add = true,
+            .src0 = SP_CS_NDRANGE_1(CHIP),
+            .src1 = local_size[0] - 1,
+         });
 
          unsigned local_size_log2 = util_logbase2(local_size[0]);
 
@@ -9719,20 +9695,15 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
           *          = scratch0 / local_size
           *          = (CS_NDRANGE_1 + local_size - 1) / local_size
           */
-         tu_cs_emit_pkt7(cs, CP_REG_RMW, 3);
-         tu_cs_emit(cs,
-                    CP_REG_RMW_0_DST_REG(0) |
-                    CP_REG_RMW_0_DST_SCRATCH |
-                    CP_REG_RMW_0_SKIP_WAIT_FOR_ME |
-                    CP_REG_RMW_0_ROTATE(32 - local_size_log2));
-         tu_cs_emit(cs, ~(local_size[0] - 1)); /* SRC0 */
-         tu_cs_emit(cs, 0); /* SRC1 */
+         cs->rmw(tu_scratch(tu_dispatch.scratch0), {
+            .skip_wfm = true,
+            .rotate = (32 - local_size_log2) & 0x1f,
+            .src0 = ~(local_size[0] - 1),
+            .src1 = 0,
+         });
 
          /* write scratch0 to SP_CS_KERNEL_GROUP_X */
-         tu_cs_emit_pkt7(cs, CP_SCRATCH_TO_REG, 1);
-         tu_cs_emit(cs,
-                    CP_SCRATCH_TO_REG_0_REG(SP_CS_KERNEL_GROUP_X(CHIP).reg) |
-                    CP_SCRATCH_TO_REG_0_SCRATCH(0));
+         cs->scratch_to_reg(SP_CS_KERNEL_GROUP_X(CHIP), tu_scratch(tu_dispatch.scratch0), 1);
       } else {
          tu_cs_emit_regs(cs,
                          SP_CS_NDRANGE_0(CHIP, .kerneldim = 3,
@@ -10177,7 +10148,7 @@ tu_barrier(struct tu_cmd_buffer *cmd,
       if ((srcStage & ~framebuffer_space_stages) ||
           (dstStage & ~framebuffer_space_stages)) {
          cmd->state.rp.disable_gmem = true;
-         cmd->state.rp.gmem_disable_reason = "Non-framebuffer-space barrier";
+         cmd->state.rp.force_render_mode_reason = "Non-framebuffer-space barrier";
       }
    }
 

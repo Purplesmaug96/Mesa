@@ -276,6 +276,25 @@ impl DisplayOp for OpBarrier {
 
 #[repr(C)]
 #[derive(Clone, Opcode)]
+pub struct OpAdr {
+    #[dst_type(I32)]
+    pub dst: Dst,
+
+    pub label: Label,
+}
+
+impl DisplayOp for OpAdr {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ADR")
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, " {}", self.label)
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Opcode)]
 pub struct OpBitRev {
     #[dst_type(I32)]
     pub dst: Dst,
@@ -998,7 +1017,7 @@ impl DisplayOp for OpF32ToI32 {
     }
 
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, " {}", self.fmt_src(&self.src))
+        write!(f, "{} {}", self.round, self.fmt_src(&self.src))
     }
 }
 
@@ -2327,6 +2346,11 @@ impl DisplayOp for OpIToF32 {
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub enum MemAccess {
     None,
+    /// Hint that the memory being accessed is constant for the duration of
+    /// this shader invocation.  Constant memory will get cached normally but
+    /// constant loads may be reordered with respect to other memory loads and
+    /// stores.
+    Const,
     IStream,
     EStream,
     Force,
@@ -2336,6 +2360,7 @@ impl fmt::Display for MemAccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MemAccess::None => Ok(()),
+            MemAccess::Const => write!(f, ".const"),
             MemAccess::IStream => write!(f, ".istream"),
             MemAccess::EStream => write!(f, ".estream"),
             MemAccess::Force => write!(f, ".force"),
@@ -2374,7 +2399,7 @@ impl DisplayOp for OpLdAttr {
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} {} {}",
+            " {} {} {}",
             self.fmt_src(&self.vertex_index),
             self.fmt_src(&self.instance_index),
             self.fmt_handle_src(&self.handle),
@@ -2656,7 +2681,7 @@ impl DisplayOp for OpLoad {
         write!(
             f,
             "{}{} {} #{}",
-            bool_as_mod_str!(self.is_tls, "tls"),
+            bool_as_mod_str!(self.is_tls, ".tls"),
             self.access,
             self.fmt_src(&self.addr),
             self.offset,
@@ -3155,6 +3180,39 @@ impl Foldable for OpPopCount {
     }
 }
 
+/// Preload description for pretty-printing
+#[derive(Clone, Copy)]
+pub struct PreloadInfo {
+    pub set: PreloadRegSet,
+    pub comp: u8,
+}
+
+impl fmt::Display for PreloadInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        assert!(!self.set.is_empty());
+        if self.set.len() == 1 {
+            let reg = self.set.iter().next().unwrap();
+            write!(f, "{reg}")?;
+            if reg.reg_size() != 1 {
+                debug_assert!(reg.reg_size() <= 4, "need more swizzle names");
+                let swiz = ['x', 'y', 'z', 'w'];
+
+                write!(f, ".{}", swiz[self.comp as usize])?;
+            }
+        } else {
+            // Components are only for single-register preloads.
+            assert!(self.comp == 0);
+            for (i, reg) in self.set.iter().enumerate() {
+                if i != 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{reg}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Opcode)]
 #[variants(dst_type in [I8, I16, I32, I64])]
@@ -3162,6 +3220,7 @@ pub struct OpRegIn {
     pub dst: Dst,
     pub dst_type: DataType,
     pub reg: RegRef,
+    pub preload: Option<PreloadInfo>,
 }
 
 impl DisplayOp for OpRegIn {
@@ -3170,7 +3229,12 @@ impl DisplayOp for OpRegIn {
     }
 
     fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, " {}", &self.reg)
+        write!(f, " {}", &self.reg)?;
+
+        if let Some(info) = self.preload {
+            write!(f, " ({info})")?;
+        }
+        Ok(())
     }
 }
 
@@ -3209,6 +3273,25 @@ impl VirtualOpcode for OpRegOut {
         swizzle == Swizzle::from(self.reg.range)
     }
 }
+
+// Virtual operation to mark scheduling barriers, message instructions are not
+// allowed to move across the barrier and must finish by it. This op is not
+// encoded and must be removed at the end of the compiliation pipeline.
+#[repr(C)]
+#[derive(Clone, Opcode)]
+pub struct OpScheduleBarrier {}
+
+impl DisplayOp for OpScheduleBarrier {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SCHEDULE_BARRIER")
+    }
+
+    fn fmt_body(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
+}
+
+impl VirtualOpcode for OpScheduleBarrier {}
 
 #[derive(Clone, Copy, Default, PartialEq)]
 pub enum ShiftOp {
@@ -3421,8 +3504,8 @@ impl DisplayOp for OpStore {
         write!(
             f,
             "{}{}{} {} {} #{}",
-            bool_as_mod_str!(self.is_tls, "tls"),
-            bool_as_mod_str!(self.is_psiz, "psiz"),
+            bool_as_mod_str!(self.is_tls, ".tls"),
+            bool_as_mod_str!(self.is_psiz, ".psiz"),
             self.access,
             self.fmt_src(&self.data),
             self.fmt_src(&self.addr),
@@ -3839,6 +3922,7 @@ impl DisplayOp for OpWMask {
 #[derive(Clone, FromVariants, Opcode)]
 pub enum Op {
     ACmpXchg(Box<OpACmpXchg>),
+    Adr(Box<OpAdr>),
     Atom(Box<OpAtom>),
     Atom1(Box<OpAtom1>),
     Barrier(OpBarrier),
@@ -3907,6 +3991,7 @@ pub enum Op {
     PopCount(Box<OpPopCount>),
     RegIn(Box<OpRegIn>),
     RegOut(Box<OpRegOut>),
+    ScheduleBarrier(OpScheduleBarrier),
     ShiftLop(Box<OpShiftLop>),
     StCvt(Box<OpStCvt>),
     Store(Box<OpStore>),
@@ -3923,6 +4008,15 @@ const _: () = {
     assert!(size_of::<Op>() == 16);
 };
 
+#[derive(PartialEq)]
+pub enum MemoryEffect {
+    None,
+    ConstRead,
+    Read,
+    Write,
+    ReadWrite,
+}
+
 impl Op {
     pub fn as_virtual(&self) -> Option<&dyn VirtualOpcode> {
         match self {
@@ -3933,6 +4027,7 @@ impl Op {
             Op::PhiSrc(op) => Some(op.as_ref()),
             Op::RegIn(op) => Some(op.as_ref()),
             Op::RegOut(op) => Some(op.as_ref()),
+            Op::ScheduleBarrier(op) => Some(op),
             Op::Swz(op) => Some(op.as_ref()),
             _ => None,
         }
@@ -3947,9 +4042,36 @@ impl Op {
                 | Op::Barrier(_)
                 | Op::Branch(_)
                 | Op::RegOut(_)
+                | Op::ScheduleBarrier(_)
                 | Op::Store(_)
                 | Op::StCvt(_)
         )
+    }
+
+    pub fn memory_effect(&self) -> MemoryEffect {
+        let read_with_access = |access: MemAccess| {
+            if access == MemAccess::Const {
+                MemoryEffect::ConstRead
+            } else {
+                MemoryEffect::Read
+            }
+        };
+        match self {
+            Op::LdAttr(_) => MemoryEffect::ConstRead,
+            Op::LdCvt(op) => read_with_access(op.access),
+            Op::LdPka(op) => read_with_access(op.access),
+            Op::Load(op) => read_with_access(op.access),
+            Op::LdTex(_) => MemoryEffect::Read,
+            Op::TexFetch(_)
+            | Op::TexGather(_)
+            | Op::TexGradient(_)
+            | Op::TexSingle(_) => MemoryEffect::ConstRead,
+            Op::Store(_) | Op::StCvt(_) => MemoryEffect::Write,
+            Op::ACmpXchg(_) | Op::Atom(_) | Op::Atom1(_) => {
+                MemoryEffect::ReadWrite
+            }
+            _ => MemoryEffect::None,
+        }
     }
 }
 

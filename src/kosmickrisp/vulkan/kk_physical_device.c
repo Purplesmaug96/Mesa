@@ -142,6 +142,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
 
       /* Optional extensions */
       .KHR_calibrated_timestamps = true,
+      .KHR_deferred_host_operations = true,
       .KHR_maintenance7 = true,
       .KHR_maintenance8 = true,
       .KHR_maintenance9 = true,
@@ -1106,12 +1107,18 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
       settings->disabled_workarounds |= BITFIELD64_BIT(11);
       settings->disabled_workarounds |= BITFIELD64_BIT(12);
       settings->disabled_workarounds |= BITFIELD64_BIT(17);
+      settings->disabled_workarounds |= BITFIELD64_BIT(18);
    }
-   /* M5-only workarounds */
+   /* M5 only workarounds */
+   if (pdev->info.gpu_apple_family >= 10) {
+      settings->disabled_workarounds &= ~BITFIELD64_BIT(2);
+   }
    if (pdev->info.gpu_apple_family < 10) {
       settings->disabled_workarounds |= BITFIELD64_BIT(16);
-   } else {
-      settings->disabled_workarounds &= ~BITFIELD64_BIT(2);
+   }
+   /* M3+ only workarounds */
+   if (pdev->info.gpu_apple_family < 9) {
+      settings->disabled_workarounds |= BITFIELD64_BIT(18);
    }
 }
 

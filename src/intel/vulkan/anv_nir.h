@@ -112,7 +112,6 @@ bool anv_nir_apply_pipeline_layout(nir_shader *shader,
                                    enum brw_robustness_flags robust_flags,
                                    struct anv_descriptor_set_layout * const *set_layouts,
                                    uint32_t set_count,
-                                   const uint32_t *dynamic_offset_start,
                                    bool device_bindable,
                                    struct anv_pipeline_bind_map *map,
                                    struct anv_pipeline_push_map *push_map,
@@ -129,6 +128,8 @@ struct anv_nir_push_layout_info {
    bool separate_tessellation;
    bool fragment_dynamic;
    bool mesh_dynamic;
+   bool use_fs_color_offset;
+   bool use_fs_color_map;
 };
 
 bool anv_nir_shrink_push_constant_ranges(nir_shader *nir);

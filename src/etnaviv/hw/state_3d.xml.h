@@ -8,14 +8,14 @@ http://0x04.net/cgit/index.cgi/rules-ng-ng
 git clone git://0x04.net/rules-ng-ng
 
 The rules-ng-ng source files this header was generated from are:
-- state.xml     (  30841 bytes, from 2026-08-06 20:34:59)
-- common.xml    (  35664 bytes, from 2026-07-29 06:39:05)
-- common_3d.xml (  15069 bytes, from 2026-07-29 06:39:05)
-- state_hi.xml  (  35909 bytes, from 2026-07-29 06:39:05)
+- state.xml     (  30841 bytes, from 2026-08-30 21:08:22)
+- common.xml    (  35664 bytes, from 2026-08-30 21:08:22)
+- common_3d.xml (  15069 bytes, from 2026-08-30 21:08:22)
+- state_hi.xml  (  35909 bytes, from 2026-08-30 21:08:22)
 - copyright.xml (   1597 bytes, from 2026-03-02 22:49:28)
-- state_2d.xml  (  52271 bytes, from 2026-03-02 22:49:28)
-- state_3d.xml  (  92765 bytes, from 2026-08-06 20:37:58)
-- state_blt.xml (  15932 bytes, from 2026-08-06 20:34:59)
+- state_2d.xml  (  52271 bytes, from 2026-08-14 11:48:48)
+- state_3d.xml  (  92949 bytes, from 2026-08-30 21:08:58)
+- state_blt.xml (  15932 bytes, from 2026-08-30 21:08:58)
 - state_vg.xml  (   5975 bytes, from 2026-03-02 22:49:28)
 
 Copyright (C) 2012-2026 by the following authors:
@@ -111,6 +111,7 @@ DEALINGS IN THE SOFTWARE.
 #define PE_FORMAT_A2B10G10R10UI					0x0000001e
 #define PE_FORMAT_G8R8						0x0000001f
 #define PE_FORMAT_R8						0x00000023
+#define PE_FORMAT_A8B8G8R8					0x0000002b
 #define LOGIC_OP_CLEAR						0x00000000
 #define LOGIC_OP_NOR						0x00000001
 #define LOGIC_OP_AND_INVERTED					0x00000002
@@ -1445,6 +1446,7 @@ DEALINGS IN THE SOFTWARE.
 
 #define VIVS_RS_SINGLE_BUFFER					0x000016b8
 #define VIVS_RS_SINGLE_BUFFER_ENABLE				0x00000001
+#define VIVS_RS_SINGLE_BUFFER_DOWNSAMPLE_ONE_SAMPLE		0x00000002
 
 #define VIVS_RS_PIPE(i0)				       (0x00000000 + 0x4*(i0))
 #define VIVS_RS_PIPE__ESIZE					0x00000004

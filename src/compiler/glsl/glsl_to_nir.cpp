@@ -290,6 +290,7 @@ nir_visitor::constant_copy(ir_constant *ir, void *mem_ctx)
       break;
 
    case GLSL_TYPE_INT:
+   case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       /* Only float base types can be matrices. */
       assert(cols == 1);
 
@@ -475,6 +476,7 @@ nir_visitor::visit(ir_variable *ir)
    var->data.implicit_sized_array = ir->data.implicit_sized_array;
    var->data.from_ssbo_unsized_array = ir->data.from_ssbo_unsized_array;
    var->data.per_primitive = ir->data.per_primitive;
+   var->data.yuv = ir->data.yuv;
 
    switch(ir->data.mode) {
    case ir_var_auto:
@@ -3000,7 +3002,7 @@ glsl_float64_funcs_to_nir(struct gl_context *ctx,
    NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_dce);
    NIR_PASS(_, nir, nir_opt_cse);
-   NIR_PASS(_, nir, nir_opt_gcm, true, true);
+   NIR_PASS(_, nir, nir_opt_gcm, true);
 
    nir_opt_peephole_select_options peephole_select_options = {};
    peephole_select_options.limit = 1;

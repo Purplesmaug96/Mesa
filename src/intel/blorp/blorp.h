@@ -71,6 +71,7 @@ struct blorp_config {
    bool use_mesh_shading;
    bool use_unrestricted_depth_range;
    bool use_cached_dynamic_states;
+   bool use_efficient_64bit;
 };
 
 enum blorp_dynamic_state {
@@ -112,14 +113,14 @@ struct blorp_context {
 
    bool (*lookup_shader)(struct blorp_batch *batch,
                          const void *key, uint32_t key_size,
-                         uint32_t *kernel_out, void *prog_data_out);
+                         uint64_t *kernel_out, void *prog_data_out);
    bool (*upload_shader)(struct blorp_batch *batch,
                          uint32_t stage,
                          const void *key, uint32_t key_size,
                          const void *kernel, uint32_t kernel_size,
                          const void *prog_data,
                          uint32_t prog_data_size,
-                         uint32_t *kernel_out, void *prog_data_out);
+                         uint64_t *kernel_out, void *prog_data_out);
    uint64_t (*get_surface_address)(struct blorp_batch *batch,
                                    struct blorp_address addr);
    void (*exec)(struct blorp_batch *batch, const struct blorp_params *params);
@@ -383,7 +384,7 @@ blorp_hiz_clear_depth_stencil(struct blorp_batch *batch,
                               bool clear_stencil, uint8_t stencil_value);
 void
 blorp_clear_attachments(struct blorp_batch *batch,
-                        uint32_t binding_table_offset,
+                        uint64_t binding_table_offset_or_ss_pointer,
                         enum isl_format depth_format,
                         uint32_t num_samples,
                         uint32_t start_layer, uint32_t num_layers,

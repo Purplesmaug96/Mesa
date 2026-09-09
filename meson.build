@@ -361,7 +361,7 @@ with_vdrm = [
 
 if with_virtio_vk
   dep_venus_protocol = dependency('venus-protocol',
-    version : '== 1.1',
+    version : '== 1.1.3',
     fallback : ['venus-protocol', 'dep_vn_protocol_driver'],
     required : true
   )
@@ -968,7 +968,9 @@ if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or 
   bindgen_bad_versions = [
     # unknown covers buggy 0.69.0, 0.71.0
     'unknown',
-    '0.72.0',
+    '0.72.0', # https://github.com/rust-lang/rust-bindgen/issues/3264
+    '0.73.0', # https://github.com/rust-lang/rust-bindgen/issues/3454
+    '0.73.1', # https://github.com/rust-lang/rust-bindgen/issues/3454
   ]
   if bindgen_version in bindgen_bad_versions
     error('Your bingden version is known to be buggy, please upgrade it. ' +

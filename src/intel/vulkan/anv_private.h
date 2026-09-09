@@ -802,8 +802,8 @@ VkResult anv_block_pool_init(struct anv_block_pool *pool,
                              struct anv_device *device,
                              const char *name,
                              uint64_t start_address,
-                             uint32_t initial_size,
-                             uint32_t max_size);
+                             uint64_t initial_size,
+                             uint64_t max_size);
 void anv_block_pool_finish(struct anv_block_pool *pool);
 VkResult anv_block_pool_alloc(struct anv_block_pool *pool,
                               uint32_t block_size,
@@ -816,7 +816,7 @@ struct anv_state_pool_params {
    uint64_t    base_address;
    int64_t     start_offset;
    uint32_t    block_size;
-   uint32_t    max_size;
+   uint64_t    max_size;
 };
 
 VkResult anv_state_pool_init(struct anv_state_pool *pool,
@@ -1359,6 +1359,9 @@ struct anv_shader {
          struct {
             uint32_t                 compute_walker_body[39];
          } gfx125;
+         struct {
+            uint32_t                 compute_walker_body_2[63];
+         } gfx350;
       } cs;
    };
 
@@ -1488,6 +1491,9 @@ struct anv_physical_device {
     /** True if we can create protected contexts. */
     bool                                        has_protected_contexts;
 
+    /** True if HuC firmware is loaded and authenticated. */
+    bool                                        has_huc;
+
     /** Whether KMD has the ability to create VM objects */
     bool                                        has_vm_control;
 
@@ -1554,6 +1560,12 @@ struct anv_physical_device {
      * structures instead.
      */
     bool                                        indirect_descriptors;
+
+    /**
+     * Gfx35+ only mode where HW descriptor are addresses using a 64bit
+     * address.
+     */
+    bool                                        uses_efficient_64bit;
 
     bool                                        uses_relocs;
 
@@ -1800,10 +1812,12 @@ VkResult anv_physical_device_try_create(struct vk_instance *vk_instance,
 
 void anv_physical_device_destroy(struct vk_physical_device *vk_device);
 
-static inline uint32_t
+static inline uint64_t
 anv_physical_device_bindless_heap_size(const struct anv_physical_device *device,
                                        bool descriptor_buffer)
 {
+   if (device->uses_efficient_64bit)
+      return device->va.bindless_surface_state_pool.size;
    /* Pre-Gfx12.5, the HW bindless surface heap is only 64MB. After it's 4GB,
     * but we have some workarounds that require 2 heaps to overlap, so the
     * size is dictated by our VA allocation.
@@ -1822,21 +1836,20 @@ anv_physical_device_has_vram(const struct anv_physical_device *device)
 }
 
 enum anv_debug {
-   ANV_DEBUG_BINDLESS                   = BITFIELD_BIT(0),
-   ANV_DEBUG_NO_GPL                     = BITFIELD_BIT(1),
-   ANV_DEBUG_NO_SECONDARY_CALL          = BITFIELD_BIT(2),
-   ANV_DEBUG_NO_SPARSE                  = BITFIELD_BIT(3),
-   ANV_DEBUG_SPARSE_TRTT                = BITFIELD_BIT(4),
-   ANV_DEBUG_VIDEO_DECODE               = BITFIELD_BIT(5),
-   ANV_DEBUG_VIDEO_ENCODE               = BITFIELD_BIT(6),
-   ANV_DEBUG_SHADER_HASH                = BITFIELD_BIT(7),
-   ANV_DEBUG_NO_SLAB                    = BITFIELD_BIT(8),
-   ANV_DEBUG_DESCRIPTOR_DIRTY           = BITFIELD_BIT(9),
-   ANV_DEBUG_SHADER_PRINT               = BITFIELD_BIT(10),
-   ANV_DEBUG_SHADER_DUMP                = BITFIELD_BIT(11),
-   ANV_DEBUG_EXPERIMENTAL               = BITFIELD_BIT(12),
-   ANV_DEBUG_DGC_DUMP                   = BITFIELD_BIT(13),
-   ANV_DEBUG_SKIP_DISK_CACHE            = BITFIELD_BIT(14),
+   ANV_DEBUG_NO_GPL                     = BITFIELD_BIT(0),
+   ANV_DEBUG_NO_SECONDARY_CALL          = BITFIELD_BIT(1),
+   ANV_DEBUG_NO_SPARSE                  = BITFIELD_BIT(2),
+   ANV_DEBUG_SPARSE_TRTT                = BITFIELD_BIT(3),
+   ANV_DEBUG_VIDEO_DECODE               = BITFIELD_BIT(4),
+   ANV_DEBUG_VIDEO_ENCODE               = BITFIELD_BIT(5),
+   ANV_DEBUG_SHADER_HASH                = BITFIELD_BIT(6),
+   ANV_DEBUG_NO_SLAB                    = BITFIELD_BIT(7),
+   ANV_DEBUG_DESCRIPTOR_DIRTY           = BITFIELD_BIT(8),
+   ANV_DEBUG_SHADER_PRINT               = BITFIELD_BIT(9),
+   ANV_DEBUG_SHADER_DUMP                = BITFIELD_BIT(10),
+   ANV_DEBUG_EXPERIMENTAL               = BITFIELD_BIT(11),
+   ANV_DEBUG_DGC_DUMP                   = BITFIELD_BIT(12),
+   ANV_DEBUG_SKIP_DISK_CACHE            = BITFIELD_BIT(13),
 };
 
 extern enum anv_debug anv_debug;
@@ -2015,6 +2028,8 @@ enum anv_gfx_state_bits {
    ANV_GFX_STATE_WA_18019110168, /* Fake state to implement workaround */
    ANV_GFX_STATE_TBIMR_TILE_PASS_INFO,
    ANV_GFX_STATE_FS_CONFIG,
+   ANV_GFX_STATE_FS_COLOR_MAP,
+   ANV_GFX_STATE_FS_COLOR_OFFSET,
    ANV_GFX_STATE_TESS_CONFIG,
    ANV_GFX_STATE_MESH_PROVOKING_VERTEX,
 
@@ -2161,9 +2176,9 @@ struct anv_gfx_dynamic_state {
 
    /* 3DSTATE_PS */
    struct {
-      uint32_t KernelStartPointer0;
-      uint32_t KernelStartPointer1;
-      uint32_t KernelStartPointer2;
+      uint64_t KernelStartPointer0;
+      uint64_t KernelStartPointer1;
+      uint64_t KernelStartPointer2;
 
       uint32_t DispatchGRFStartRegisterForConstantSetupData0;
       uint32_t DispatchGRFStartRegisterForConstantSetupData1;
@@ -2183,6 +2198,9 @@ struct anv_gfx_dynamic_state {
       uint8_t  Kernel1SIMDWidth;
       uint8_t  Kernel0PolyPackingPolicy;
       uint8_t  Kernel0MaximumPolysperThread;
+
+      /* Gfx35+ only */
+      uint16_t RegistersperThreadforKSP1;
    } ps;
 
    /* 3DSTATE_PS_EXTRA */
@@ -2215,6 +2233,7 @@ struct anv_gfx_dynamic_state {
       float    GlobalDepthOffsetClamp;
       uint8_t  APIMode;
       bool     DXMultisampleRasterizationEnable;
+      bool     ForceMultisampling;
       bool     AntialiasingEnable;
       uint8_t  CullMode;
       uint8_t  FrontWinding;
@@ -2459,6 +2478,16 @@ struct anv_gfx_dynamic_state {
     */
    bool autostrip_disabled;
 
+   /**
+    * Attachments' RENDER_SURFACE_STATE offset in internal heap (Gfx35+)
+    */
+   uint32_t fs_color_offset;
+
+   /**
+    * Color output to attachmene mapping (Gfx35+)
+    */
+   uint32_t fs_color_map;
+
    /** Dirty bits of what needs to be repacked */
    BITSET_DECLARE(pack_dirty, ANV_GFX_STATE_MAX);
 
@@ -2478,9 +2507,9 @@ struct anv_gfx_dynamic_state {
       uint32_t so_decl_list_len;
       uint32_t clip[4];
       uint32_t clip_mesh[2];
-      uint32_t sf_clip[2];
-      uint32_t cc_viewport[2];
-      uint32_t scissor[2];
+      uint32_t sf_clip[3];
+      uint32_t cc_viewport[3];
+      uint32_t scissor[3];
       uint32_t mesh_control[3];
       uint32_t task_control[3];
       uint32_t mesh_shader[8];
@@ -2510,8 +2539,8 @@ struct anv_gfx_dynamic_state {
       uint32_t ps_extra[2];
       uint32_t ps_extra_dep[2];
       uint32_t ps_blend[2];
-      uint32_t blend_state[2];
-      uint32_t cc_state[2];
+      uint32_t blend_state[3];
+      uint32_t cc_state[3];
       uint32_t tbimr[4];
    } packed;
 
@@ -2905,7 +2934,10 @@ anv_device_get_aux_tt_pool(struct anv_device *device)
 static inline struct anv_state_pool *
 anv_device_get_dynamic_state_pool(struct anv_device *device)
 {
-   return &device->dynamic_state_pool;
+   return
+      device->physical->uses_efficient_64bit ?
+      &device->internal_surface_state_pool :
+      &device->dynamic_state_pool;
 }
 
 static inline struct anv_state_pool *
@@ -2917,6 +2949,8 @@ anv_device_get_binding_table_pool(struct anv_device *device)
 static inline struct anv_state_pool *
 anv_device_get_scratch_surface_state_pool(struct anv_device *device)
 {
+   if (device->physical->uses_efficient_64bit)
+      return &device->internal_surface_state_pool;
    return &device->scratch_surface_state_pool;
 }
 
@@ -2941,6 +2975,8 @@ anv_device_get_indirect_push_descriptor_pool(struct anv_device *device)
 static inline struct anv_state_pool *
 anv_device_get_push_descriptor_buffer_pool(struct anv_device *device)
 {
+   if (device->physical->uses_efficient_64bit)
+      return &device->internal_surface_state_pool;
    return &device->push_descriptor_buffer_pool;
 }
 
@@ -5180,6 +5216,24 @@ anv_cmd_buffer_ensure_bind_point_state(struct anv_cmd_buffer *cmd_buffer,
    return anv_cmd_buffer_alloc_bind_point_state(cmd_buffer, out_state);
 }
 
+static inline void
+anv_cmd_buffer_ensure_valid_binding_mode(struct anv_cmd_buffer *cmd_buffer)
+{
+   if (cmd_buffer->state.pending_binding_mode != ANV_SHADER_BINDING_MODE_UNKNOWN)
+      return;
+
+   /* If no API entry point selected the current mode (this can happen if the
+    * first operation in the command buffer is a transfer operation, select
+    * BUFFER if EXT_descriptor_buffer is enabled, otherwise LEGACY.
+    */
+   cmd_buffer->state.pending_binding_mode =
+      cmd_buffer->device->vk.enabled_extensions.EXT_descriptor_heap ?
+      ANV_SHADER_BINDING_MODE_HEAP :
+      cmd_buffer->device->vk.enabled_extensions.EXT_descriptor_buffer ?
+      ANV_SHADER_BINDING_MODE_BUFFER :
+      ANV_SHADER_BINDING_MODE_LEGACY;
+}
+
 static inline struct anv_bind_point_state *
 anv_cmd_buffer_get_bind_point_state(struct anv_cmd_buffer *cmd_buffer,
                                     VkPipelineBindPoint bind_point)
@@ -5245,6 +5299,16 @@ anv_cmd_buffer_has_gfx_stage(struct anv_cmd_buffer *cmd_buffer,
           ANV_INTERNAL_KERNEL_##name##_COMPUTE :                        \
           ANV_INTERNAL_KERNEL_##name##_FRAGMENT);                       \
       })
+
+
+static inline VkResult
+anv_cmd_buffer_add_reloc_bo(struct anv_cmd_buffer *cmd_buffer, struct anv_bo *bo)
+{
+   if (list_is_empty(&cmd_buffer->batch_bos))
+      anv_batch_emit_ensure_space(&cmd_buffer->batch, 4);
+
+   return anv_reloc_list_add_bo(cmd_buffer->batch.relocs, bo);
+}
 
 VkResult anv_cmd_buffer_init_batch_bo_chain(struct anv_cmd_buffer *cmd_buffer);
 void anv_cmd_buffer_fini_batch_bo_chain(struct anv_cmd_buffer *cmd_buffer);
@@ -5507,6 +5571,24 @@ static inline void
 anv_shader_internal_unref(struct anv_device *device, struct anv_shader_internal *shader)
 {
    vk_pipeline_cache_object_unref(&device->vk, &shader->base);
+}
+
+static inline uint64_t
+anv_shader_get_pointer(const struct anv_device *device,
+                       const struct anv_shader *shader)
+{
+   return device->physical->uses_efficient_64bit ?
+      (device->physical->va.shader_heap.addr + shader->kernel.offset) :
+      shader->kernel.offset;
+}
+
+static inline uint64_t
+anv_shader_internal_get_pointer(const struct anv_device *device,
+                                const struct anv_shader_internal *shader)
+{
+   return device->physical->uses_efficient_64bit ?
+      (device->physical->va.shader_heap.addr + shader->kernel.offset) :
+      shader->kernel.offset;
 }
 
 struct anv_pipeline_executable {
@@ -6905,6 +6987,11 @@ struct anv_vid_mem {
 #define ANV_MAX_H265_CTB_SIZE 64
 #define ANV_MAX_VP9_CTB_SIZE 64
 #define ANV_VP9_SCALE_FACTOR_SHIFT 14
+#define ANV_VP9_PROB_MAX_COPIES 3
+#define ANV_VP9_INTER_MODE_PROBS_OFFSET 1667
+#define ANV_VP9_INTER_MODE_PROBS_SIZE 343
+#define ANV_VP9_SEG_PROBS_OFFSET 2010
+#define ANV_VP9_EXEC_STATE_LFT_OFFSET 0
 
 enum anv_vid_mem_h264_types {
    ANV_VID_MEM_H264_INTRA_ROW_STORE,
@@ -6946,8 +7033,12 @@ enum anv_vid_mem_vp9_types {
    ANV_VID_MEM_VP9_SEGMENT_ID,
    ANV_VID_MEM_VP9_HVD_LINE_ROW_STORE,
    ANV_VID_MEM_VP9_HVD_TILE_ROW_STORE,
-   ANV_VID_MEM_VP9_MV_1,
-   ANV_VID_MEM_VP9_MV_2,
+   ANV_VID_MEM_VP9_MV_CUR,
+   ANV_VID_MEM_VP9_MV_PREV,
+   ANV_VID_MEM_VP9_SEGMENT_ID_RESET,
+   ANV_VID_MEM_VP9_INTER_PROB_SAVED,
+   ANV_VID_MEM_VP9_MV_ZERO,
+   ANV_VID_MEM_VP9_EXEC_STATE,
    ANV_VID_MEM_VP9_DEC_MAX,
 };
 
@@ -6996,6 +7087,31 @@ enum anv_vid_mem_av1_types {
    ANV_VID_MEM_AV1_MAX,
 };
 
+#define ANV_VID_MEM_ADDR(vid_, type_)                                        \
+   (struct anv_address) { (vid_)->vid_mem[type_].mem->bo,                    \
+                          (vid_)->vid_mem[type_].offset }
+
+#define ANV_VID_ATTR(dev_, bo_, ...)                                         \
+   (struct GENX(MEMORYADDRESSATTRIBUTES)) {                                  \
+      .MOCS = anv_mocs(dev_, bo_, 0),                                        \
+      __VA_ARGS__                                                            \
+   }
+
+#define ANV_VID_MEM_INIT(buf_, field_, dev_, vid_, type_, ...)               \
+   do {                                                                      \
+      (buf_).field_##Address = ANV_VID_MEM_ADDR(vid_, type_);                \
+      (buf_).field_##AddressAttributes =                                     \
+         ANV_VID_ATTR(dev_, (vid_)->vid_mem[type_].mem->bo, __VA_ARGS__);    \
+   } while (0)
+
+#define ANV_VID_CACHE_INIT(buf_, field_, dev_, offset_)                      \
+   do {                                                                      \
+      (buf_).field_##Address = (struct anv_address) { NULL, offset_ };       \
+      (buf_).field_##AddressAttributes =                                     \
+         ANV_VID_ATTR(dev_, NULL,                                            \
+                      .RowStoreScratchBufferCacheSelect = 1);                \
+   } while (0)
+
 struct anv_av1_video_refs_info {
    const struct anv_image_view *iv;
    uint32_t array_layer;
@@ -7006,10 +7122,6 @@ struct anv_av1_video_refs_info {
 struct anv_vp9_last_frame_info {
    uint32_t width;
    uint32_t height;
-   StdVideoVP9FrameType frame_type;
-   bool key_frame;
-   bool show_frame;
-   bool mv_in_turn;
 };
 
 struct anv_video_session {
@@ -7024,10 +7136,9 @@ struct anv_video_session {
 
    /* For VP9 decoding from here */
    struct anv_vp9_last_frame_info vp9_last_frame;
-   /* Indicate if there's pending partial reset for prob 0 */
-   bool pending_frame_partial_reset;
-   /* Indicate if inter probs saved for prob 0 */
-   bool saved_inter_probs;
+
+   /* Indicate if the zero-source buffers are zero-initialized */
+   bool vp9_zero_buffers_initialized;
 
    /*
     * The prob_tbl_set can have the following:
@@ -7036,10 +7147,8 @@ struct anv_video_session {
     * 1: Reset partially from INTER_MODE_PROBS_OFFSET to SEG_PROBS_OFFSET
     * 2: Copy seg prob
     * 3: Copy seg prob default
-    * 4: Save inter probs
-    * 5: Restore inter probs
     */
-   BITSET_DECLARE(prob_tbl_set, 6);
+   BITSET_DECLARE(prob_tbl_set, 4);
 
    /* Mask for resetting all each frame context */
    BITSET_DECLARE(frame_ctx_reset_mask, 4);
@@ -7051,23 +7160,36 @@ struct anv_video_session {
 void anv_init_av1_cdf_tables(struct anv_cmd_buffer *cmd,
                              struct anv_video_session *vid);
 
-void anv_update_vp9_tables(struct anv_cmd_buffer *cmd,
-                           struct anv_video_session *video,
-                           uint32_t prob_id,
-                           bool key_frame,
-                           const StdVideoVP9Segmentation *seg);
+void anv_init_vp9_zero_buffers(struct anv_cmd_buffer *cmd,
+                               struct anv_video_session *vid);
+
+struct anv_vp9_prob_copy {
+   uint32_t staging_offset;
+   uint32_t dst_offset;
+   uint32_t size;
+};
+
+uint32_t anv_vp9_fill_prob_staging(struct anv_video_session *vid,
+                                   void *staging,
+                                   bool key_frame,
+                                   const StdVideoVP9Segmentation *seg,
+                                   struct anv_vp9_prob_copy *copies);
+
+void anv_vp9_fill_inter_default_probs(void *staging);
 
 void anv_calculate_qmul(const struct VkVideoDecodeVP9PictureInfoKHR *vp9_pic,
                         uint32_t qyac,
                         uint32_t seg_id,
                         int16_t *ptr);
 
-void anv_vp9_reset_segment_id(struct anv_cmd_buffer *cmd,
-                              struct anv_video_session *vid);
-
 uint32_t anv_video_get_image_mv_size(struct anv_device *device,
                                      struct anv_image *image,
                                      const struct VkVideoProfileListInfoKHR *profile_list);
+
+uint32_t
+anv_h265_slice_size(const VkVideoDecodeInfoKHR *frame_info,
+                    const VkVideoDecodeH265PictureInfoKHR *h265_pic_info,
+                    unsigned s);
 
 static inline struct anv_address MUST_CHECK
 anv_image_dpb_address(const struct anv_image_view *iv,

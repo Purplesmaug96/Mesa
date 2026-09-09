@@ -88,6 +88,8 @@ pub trait Model {
     }
 
     fn max_threads(&self, registers_used: u8) -> u8;
+
+    fn max_reg_count(&self) -> u8;
 }
 
 struct ValhallModel {
@@ -285,20 +287,24 @@ impl Model for ValhallModel {
             PrimitiveFlags => 58,
             PositionXY => 59,
             CumulativeCoverage => 60,
-            RasterizerSampleCentroid => 61,
-            FrameArgLow => 62,
-            FrameArgHigh => 63,
+            RasterizerCoverage => 61,
+            SampleCentroidId => 61,
+            FrameArg => 62,
         };
 
         Some(RegRef {
-            idx,
-            range: RegRange::Regs(1),
-            preload: Some(preload),
+            idx: idx,
+            range: RegRange::Regs(preload.reg_size()),
         })
     }
 
     fn max_threads(&self, registers_used: u8) -> u8 {
         64 / registers_used.max(32)
+    }
+
+    fn max_reg_count(&self) -> u8 {
+        debug_assert!(self.arch() >= 9, "Unknown GPU generation");
+        if self.arch() >= 15 { 128 } else { 64 }
     }
 }
 

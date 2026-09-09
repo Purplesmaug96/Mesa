@@ -133,7 +133,6 @@ impl V9Encoder<'_> {
         &self,
         isa_instr: impl TryEncode<Encoded = [u32; 2], Error: std::fmt::Debug>,
     ) -> [u32; 2] {
-        let fau_page_index = instr_fau_page(&self.instr).unwrap_or(0);
         let flow = encode_flow(self.instr.flow, self.arch)
             .try_encode(self.arch)
             .expect("Failed to encode flow");
@@ -143,7 +142,9 @@ impl V9Encoder<'_> {
             .expect("Failed to encode instruction");
 
         let mut b = BitMutView::new(&mut bits);
-        b.set_field(57..59, fau_page_index);
+        if let Some(page) = instr_fau_page(&self.instr) {
+            b.set_field(57..59, page);
+        }
         b.set_field(59..63, flow);
 
         bits
@@ -242,7 +243,10 @@ fn encode_typed_src(src: &Src, src_type: DataType) -> v9::EncodedSrc {
             assert_eq!(src_type.num_type(), NumericType::Float);
         }
         SrcMod::BNot => {
-            assert_eq!(src_type.num_type(), NumericType::Integer);
+            assert!(matches!(
+                src_type.num_type(),
+                NumericType::Integer | NumericType::UnsignedInteger
+            ));
         }
     }
 
@@ -530,7 +534,7 @@ impl TryFrom<u8> for VecsizeVaryingM {
 impl From<MemAccess> for AccessLoadM {
     fn from(access: MemAccess) -> AccessLoadM {
         match access {
-            MemAccess::None => AccessLoadM::None,
+            MemAccess::None | MemAccess::Const => AccessLoadM::None,
             MemAccess::IStream => AccessLoadM::Istream,
             MemAccess::EStream => AccessLoadM::Estream,
             MemAccess::Force => AccessLoadM::Force,
@@ -542,6 +546,7 @@ impl From<MemAccess> for AccessStoreM {
     fn from(access: MemAccess) -> AccessStoreM {
         match access {
             MemAccess::None => AccessStoreM::None,
+            MemAccess::Const => panic!("Cannot store to const memory"),
             MemAccess::IStream => AccessStoreM::Istream,
             MemAccess::EStream => AccessStoreM::Estream,
             MemAccess::Force => AccessStoreM::Force,
@@ -697,6 +702,19 @@ impl V9Instr for OpBarrier {
 
     fn encode(&self, e: V9Encoder) -> EncodedInstr {
         e.encode(Barrier {})
+    }
+}
+
+impl V9Instr for OpAdr {
+    fn get_info(&self, arch: u8) -> Option<V9InstrInfo> {
+        V9InstrInfo::from_isa(Adr::get_info((), arch), src_map! {})
+    }
+
+    fn encode(&self, e: V9Encoder) -> EncodedInstr {
+        e.encode(Adr {
+            dst: op_encode_dst(self, &self.dst),
+            imm1w: e.get_pc_rel_offset(&self.label),
+        })
     }
 }
 
@@ -2878,6 +2896,7 @@ macro_rules! v9_op_match_else {
     ($op: expr, |$x: ident| $y: expr, $z: expr) => {
         match $op {
             Op::ACmpXchg($x) => $y,
+            Op::Adr($x) => $y,
             Op::Atom($x) => $y,
             Op::Atom1($x) => $y,
             Op::Barrier($x) => $y,
@@ -3118,6 +3137,13 @@ pub fn v9_op_dst_supported_lanes(op: &Op, arch: u8) -> DstLanesSet {
             }
         }
     }
+
+    // B1 and B3 are broken for LD_PKA (see hw_tests::test_ld_pka)
+    if matches!(op, Op::LdPka(_)) {
+        lanes.remove(ir::DstLanes::B1);
+        lanes.remove(ir::DstLanes::B3);
+    }
+
     lanes
 }
 
@@ -3144,12 +3170,29 @@ pub fn encode_v9(s: &Shader<'_>, arch: u8) -> Vec<u32> {
         ip += i64::try_from(b.instrs.len()).unwrap() * INSTR_SIZE;
     }
 
+    if let Some(pool) = &s.constant_pool {
+        let pool_ip = u64::try_from(ip + INSTR_SIZE)
+            .unwrap()
+            .next_multiple_of(128);
+        labels.insert(pool.label, i64::try_from(pool_ip).unwrap());
+    }
+
     let mut enc = Vec::new();
     let mut ip = 0_i64;
     for b in &s.blocks {
         for i in &b.instrs {
             enc.extend(encode_instr(ip, i, arch, &labels));
             ip += INSTR_SIZE;
+        }
+    }
+
+    if let Some(pool) = &s.constant_pool {
+        let pool_ip = usize::try_from(labels[&pool.label]).unwrap();
+        enc.resize(pool_ip / 4, 0);
+        for chunk in pool.data.chunks(4) {
+            let mut word = [0_u8; 4];
+            word[..chunk.len()].copy_from_slice(chunk);
+            enc.push(u32::from_le_bytes(word));
         }
     }
 

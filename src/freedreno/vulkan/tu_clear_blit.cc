@@ -24,6 +24,7 @@
 #include "tu_formats.h"
 #include "tu_image.h"
 #include "tu_lrz.h"
+#include "tu_scratch_ram.h"
 #include "tu_tracepoints.h"
 
 static const VkOffset2D blt_no_coord = { ~0, ~0 };
@@ -4653,13 +4654,13 @@ tu_emit_clear_gmem_attachment(struct tu_cmd_buffer *cmd,
       if (fdm_rect) {
             struct apply_gmem_clear_coords_state state = {
                .view = layer,
-               .rect = *fdm_rect,
+               .rect = per_layer_render_area ? cmd->state.render_areas[layer] : *fdm_rect,
             };
             tu_create_fdm_bin_patchpoint(cmd, cs, 3, TU_FDM_SKIP_BINNING,
                                          fdm_apply_gmem_clear_coords, state);
-      }
-      if (per_layer_render_area)
+      } else if (per_layer_render_area) {
          tu6_emit_blit_scissor(cmd, cs, layer, false);
+      }
       if (att->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
          if (mask & VK_IMAGE_ASPECT_DEPTH_BIT) {
             uint32_t buffer_id = tu_resolve_group_include_buffer<CHIP>(resolve_group, VK_FORMAT_D32_SFLOAT);
@@ -5114,7 +5115,8 @@ tu_clear_gmem_attachment(struct tu_cmd_buffer *cmd,
                                  attachment->used_views,
                                  per_layer_render_area,
                                  attachment->clear_mask,
-                                 &cmd->state.clear_values[a], NULL);
+                                 &cmd->state.clear_values[a],
+                                 cmd->state.fdm_enabled ? &cmd->state.render_areas[0] : NULL);
 }
 TU_GENX(tu_clear_gmem_attachment);
 
@@ -5739,15 +5741,10 @@ store_3d_blit(struct tu_cmd_buffer *cmd,
     * the end of the renderpass in the future. Use the scratch space to
     * save/restore them dynamically.
     */
-   tu_cs_emit_pkt7(cs, CP_REG_TO_SCRATCH, 1);
-   tu_cs_emit(cs, CP_REG_TO_SCRATCH_0_REG(RB_CNTL(CHIP).reg) |
-                  CP_REG_TO_SCRATCH_0_SCRATCH(0) |
-                  CP_REG_TO_SCRATCH_0_CNT(1 - 1));
+   cs->reg_to_scratch(tu_scratch(store_3d_blit.RB_CNTL), RB_CNTL(CHIP), 1);
+
    if (CHIP >= A7XX) {
-      tu_cs_emit_pkt7(cs, CP_REG_TO_SCRATCH, 1);
-      tu_cs_emit(cs, CP_REG_TO_SCRATCH_0_REG(RB_BUFFER_CNTL(CHIP).reg) |
-                     CP_REG_TO_SCRATCH_0_SCRATCH(1) |
-                     CP_REG_TO_SCRATCH_0_CNT(1 - 1));
+      cs->reg_to_scratch(tu_scratch(store_3d_blit.RB_BUFFER_CNTL), RB_BUFFER_CNTL(CHIP), 1);
    }
 
    r3d_setup<CHIP>(cmd, cs, src_format, dst_format, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -5777,21 +5774,11 @@ store_3d_blit(struct tu_cmd_buffer *cmd,
    tu_emit_event_write<CHIP>(cmd, cs, FD_CCU_CLEAN_COLOR);
 
    /* Restore RB_CNTL/GRAS_SC_BIN_CNTL saved above. */
-   tu_cs_emit_pkt7(cs, CP_SCRATCH_TO_REG, 1);
-   tu_cs_emit(cs, CP_SCRATCH_TO_REG_0_REG(RB_CNTL(CHIP).reg) |
-                  CP_SCRATCH_TO_REG_0_SCRATCH(0) |
-                  CP_SCRATCH_TO_REG_0_CNT(1 - 1));
-
-   tu_cs_emit_pkt7(cs, CP_SCRATCH_TO_REG, 1);
-   tu_cs_emit(cs, CP_SCRATCH_TO_REG_0_REG(GRAS_SC_BIN_CNTL(CHIP).reg) |
-                  CP_SCRATCH_TO_REG_0_SCRATCH(0) |
-                  CP_SCRATCH_TO_REG_0_CNT(1 - 1));
+   cs->scratch_to_reg(RB_CNTL(CHIP), tu_scratch(store_3d_blit.RB_CNTL), 1);
+   cs->scratch_to_reg(GRAS_SC_BIN_CNTL(CHIP), tu_scratch(store_3d_blit.RB_CNTL), 1);
 
    if (CHIP >= A7XX) {
-      tu_cs_emit_pkt7(cs, CP_SCRATCH_TO_REG, 1);
-      tu_cs_emit(cs, CP_SCRATCH_TO_REG_0_REG(RB_BUFFER_CNTL(CHIP).reg) |
-                        CP_SCRATCH_TO_REG_0_SCRATCH(1) |
-                        CP_SCRATCH_TO_REG_0_CNT(1 - 1));
+      cs->scratch_to_reg(RB_BUFFER_CNTL(CHIP), tu_scratch(store_3d_blit.RB_BUFFER_CNTL), 1);
    }
 }
 

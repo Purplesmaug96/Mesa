@@ -35,6 +35,13 @@ struct radv_sample_locations_state {
    VkExtent2D grid_size;
    uint32_t count;
    VkSampleLocationEXT locations[MAX_SAMPLE_LOCATIONS];
+
+   /* Derived state. */
+   int8_t hw_locations[4][8][2]; /* [pixel in quad][sample][dim] */
+   bool xmax_right_exclusion;
+   bool ymax_bottom_exclusion;
+   bool allow_small_prim_ngg_culling;
+   uint8_t log2_small_prim_ngg_culling_scaling_factor;
 };
 
 struct radv_viewport_xform_state {
@@ -72,7 +79,6 @@ struct radv_vertex_input_state {
    uint8_t format_align_req_minus_1[MAX_VERTEX_ATTRIBS];
    uint8_t component_align_req_minus_1[MAX_VERTEX_ATTRIBS];
    uint8_t format_sizes[MAX_VERTEX_ATTRIBS];
-   uint32_t attrib_index_offset[MAX_VERTEX_ATTRIBS]; /* Only used with static strides. */
    uint32_t non_trivial_format[MAX_VERTEX_ATTRIBS];
 
    uint32_t vbo_misaligned_mask;

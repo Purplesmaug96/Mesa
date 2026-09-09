@@ -84,6 +84,9 @@ def declare_options(android_version):
         # Workaround various driver
         B("always_flush_cache", False,
           "Enable flushing GPU caches with each draw call", c_name="always_flush_cache"),
+        B("anv_enable_efficient_64bit", False,
+          "Enable efficient 64bit mode on Gfx35+",
+          c_name="enable_efficient_64bit"),
         B("anv_force_filter_addr_rounding", False,
           "Force min/mag filter address rounding to be enabled even for NEAREST sampling",
           c_name="force_filter_addr_rounding"),
@@ -200,6 +203,9 @@ def declare_options(android_version):
         I("anv_enable_opt_divergent_atomics_compute_only", 0, 0, 3,
           "Enable fusion of divergent atomics for compute shaders only (see brw_divergent_atomics_flags)",
           c_name="opt_divergent_atomics_compute_only"),
+        I("anv_enable_opt_atomic_branch_compute_only", 0, 0, 7,
+          "Enable atomic-branch optimization cases as a bitmask (enum intel_atomic_branch_cases): bit0=SKIP_ON_ZERO, bit1=MAX, bit2=MIN",
+          c_name="opt_atomic_branch_compute_only"),
         F("anv_max_vs_payload", 0.90, 0.0, 1.0,
           "Maximum percentage of the register file that can be used as thread payload for the vertex shader",
           c_name="max_vs_payload"),
@@ -264,6 +270,9 @@ def declare_options(android_version):
         B("compression_control_enabled", android_version >= 37,
           "Enable VK_EXT_image_compression_control support",
           c_name="compression_control_enabled"),
+        B("anv_always_bindless", False,
+          "Forces all descriptor sets to use the internal bindless model",
+          c_name="always_bindless"),
     ]
 
     misc_options = []

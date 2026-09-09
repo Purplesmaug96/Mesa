@@ -1293,6 +1293,7 @@ static const char *sampler_dim_name[] = {
    [GLSL_SAMPLER_DIM_RECT] = "Rect",
    [GLSL_SAMPLER_DIM_BUF] = "Buf",
    [GLSL_SAMPLER_DIM_EXTERNAL] = "External",
+   [GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y] = "External-2D-Y2Y",
    [GLSL_SAMPLER_DIM_MS] = "2D-MSAA",
    [GLSL_SAMPLER_DIM_SUBPASS] = "Subpass",
    [GLSL_SAMPLER_DIM_SUBPASS_MS] = "Subpass-MSAA",
@@ -2195,8 +2196,16 @@ print_tex_instr(nir_tex_instr *instr, print_state *state)
       fprintf(fp, ", texture non-uniform");
    }
 
+   if (instr->texture_2_non_uniform) {
+      fprintf(fp, ", texture 2 non-uniform");
+   }
+
    if (instr->sampler_non_uniform) {
       fprintf(fp, ", sampler non-uniform");
+   }
+
+   if (instr->sampler_2_non_uniform) {
+      fprintf(fp, ", sampler 2 non-uniform");
    }
 
    if (instr->is_sparse) {

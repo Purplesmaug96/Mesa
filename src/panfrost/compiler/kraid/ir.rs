@@ -239,7 +239,10 @@ impl From<&SmallConstant> for FAURef {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, EnumAsU8,
+)]
 pub enum PreloadReg {
     /* Compute */
     ///  0..16 -> local_id_0
@@ -268,13 +271,25 @@ pub enum PreloadReg {
     /// 16..32 -> position_y
     PositionXY,
     ///  0..16 -> cumulative_coverage
+    /// 16..32 -> undefined
     CumulativeCoverage,
     ///  0..16 -> rasterizer_coverage
+    /// 16..32 -> undefined
+    RasterizerCoverage,
+    /// 0 ..16 -> undefined
     /// 16..24 -> sample_id
     /// 24..32 -> centroid_id
-    RasterizerSampleCentroid,
-    FrameArgLow,
-    FrameArgHigh,
+    SampleCentroidId,
+    FrameArg,
+}
+
+impl PreloadReg {
+    pub fn reg_size(&self) -> u8 {
+        match self {
+            Self::FrameArg => 2,
+            _ => 1,
+        }
+    }
 }
 
 impl fmt::Display for PreloadReg {
@@ -298,13 +313,15 @@ impl fmt::Display for PreloadReg {
             PrimitiveFlags => "PRIMITIVE_FLAGS",
             PositionXY => "POSIZTION_XY",
             CumulativeCoverage => "CUMULATIVE_COVERAGE",
-            RasterizerSampleCentroid => "RASTERIZER_COV_SAMPLE_ID_CENTROID_ID",
-            FrameArgLow => "FRAME_ARG_LO",
-            FrameArgHigh => "FRAME_ARG_HI",
+            RasterizerCoverage => "RASTERIZER_COVERAGE",
+            SampleCentroidId => "SAMPLE_CENTROID_ID",
+            FrameArg => "FRAME_ARG",
         };
         write!(f, "{name}")
     }
 }
+
+pub type PreloadRegSet = U8EnumSet<PreloadReg, 1>;
 
 /// Handle referencing an external resource (e.g. sampler, texture, attribute,
 /// uniform buffer...).  It is just a pair of indices, one selecting a "table",
@@ -360,7 +377,7 @@ impl fmt::Display for ResHandle {
 /// half of a register, it is swizzled accordingly.  For 16-bit destinations,
 /// the instruction itself continues to operate 32 bits wide and the register
 /// write is simply masked.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegRange {
     Byte0,
     Byte1,
@@ -430,27 +447,15 @@ impl From<RegRange> for Swizzle {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RegRef {
     pub idx: u8,
     pub range: RegRange,
-    /// Optional preload origin for pretty printing
-    pub preload: Option<PreloadReg>,
-}
-
-impl PartialEq for RegRef {
-    fn eq(&self, other: &RegRef) -> bool {
-        // preload is intentionally missing
-        self.idx.eq(&other.idx) && self.range.eq(&other.range)
-    }
 }
 
 impl fmt::Display for RegRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.preload {
-            Some(d) => write!(f, "{d}")?,
-            None => write!(f, "r{}", self.idx)?,
-        };
+        self.fmt_base(f)?;
 
         match &self.range {
             RegRange::Byte0 => write!(f, ".b0"),
@@ -470,6 +475,10 @@ impl fmt::Display for RegRef {
 }
 
 impl RegRef {
+    fn fmt_base(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "r{}", self.idx)
+    }
+
     pub fn bytes(&self) -> u8 {
         self.range.bytes()
     }
@@ -478,6 +487,10 @@ impl RegRef {
         let (offset, bytes) = self.range.byte_offset_count();
         let b_start = u16::from(self.idx) * 4 + u16::from(offset);
         b_start..(b_start + u16::from(bytes))
+    }
+
+    pub fn new(idx: u8, range: RegRange) -> Self {
+        Self { idx, range }
     }
 
     pub fn from_byte_range(range: Range<u16>) -> Result<RegRef, &'static str> {
@@ -490,23 +503,37 @@ impl RegRef {
                 .try_into()
                 .map_err(|_| "Register range too large")?,
         )?;
-        Ok(RegRef {
-            idx,
-            range,
-            preload: None,
-        })
+        Ok(RegRef { idx, range })
     }
 
-    pub fn word(mut self, word: u8) -> RegRef {
-        if let RegRange::Regs(nregs) = self.range {
-            assert!(word < nregs, "RegRef::word() out of bounds");
-            self.idx += word;
-            self.range = RegRange::Regs(1);
-            self
+    pub fn intersect(&self, other: RegRef) -> Option<RegRef> {
+        let a = self.byte_range();
+        let b = other.byte_range();
+        let start = a.start.max(b.start);
+        let end = a.end.min(b.end);
+        if start >= end {
+            None
         } else {
-            assert!(word == 0);
-            self
+            // Can't be too large, it must be smaller than both a and b
+            Some(RegRef::from_byte_range(start..end).unwrap())
         }
+    }
+
+    pub fn word(self, word: u8) -> RegRef {
+        let RegRange::Regs(nregs) = self.range else {
+            assert!(word == 0);
+            return self;
+        };
+        assert!(word < nregs, "RegRef::word() out of bounds");
+        RegRef {
+            idx: self.idx + word,
+            range: RegRange::Regs(1),
+        }
+    }
+
+    pub fn reg_range(&self) -> Range<u16> {
+        let bytes = self.byte_range();
+        u16::from(self.idx)..u16::from(bytes.end.div_ceil(4))
     }
 }
 
@@ -699,7 +726,7 @@ impl From<MemRef> for SrcRef {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Default, Eq, Hash, PartialEq, EnumAsU8)]
 pub enum SrcMod {
     #[default]
     None = 0,
@@ -821,7 +848,11 @@ pub struct FmtSrc<'a> {
 impl fmt::Display for FmtSrc<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let lu = if self.src.last_use { "^" } else { "" };
-        write!(f, "{}{lu}", self.src.src_ref)?;
+        match &self.src.src_ref {
+            SrcRef::Reg(reg) => reg.fmt_base(f)?,
+            src_ref => write!(f, "{src_ref}")?,
+        }
+        write!(f, "{lu}")?;
         if let Some(asm_swz) =
             AsmSwizzleWiden::from_swizzle(self.src_type, self.src.swizzle)
         {
@@ -976,6 +1007,20 @@ impl Src {
                 .fold_u32(u.into())
                 .is_some_and(|u| (u & 0xffff) == (u >> 16)),
             _ => self.swizzle.replicates_half(),
+        }
+    }
+
+    pub fn as_ssa(&self) -> Option<&SSARef> {
+        let vec = self.src_ref.as_ssa()?;
+        let swz = match vec.bytes() {
+            1 => Swizzle::B0000,
+            2 => Swizzle::H00,
+            _ => Swizzle::NONE,
+        };
+        if self.src_mod.is_none() && self.swizzle == swz {
+            Some(vec)
+        } else {
+            None
         }
     }
 }
@@ -1301,7 +1346,11 @@ pub struct Dst {
 
 impl fmt::Display for Dst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", &self.dst_ref, &self.lanes)
+        match &self.dst_ref {
+            DstRef::Reg(reg) => reg.fmt_base(f)?,
+            dst_ref => write!(f, "{dst_ref}")?,
+        }
+        write!(f, "{}", self.lanes)
     }
 }
 
@@ -1508,6 +1557,14 @@ pub trait Opcode:
         })
     }
 
+    fn iter_reg_uses(&self) -> impl DoubleEndedIterator<Item = &RegRef> {
+        self.srcs().iter().filter_map(|src| src.src_ref.as_reg())
+    }
+
+    fn iter_reg_defs(&self) -> impl DoubleEndedIterator<Item = &RegRef> {
+        self.dsts().iter().filter_map(|dst| dst.dst_ref.as_reg())
+    }
+
     fn fmt_src<'a>(&self, src: &'a Src) -> FmtSrc<'a> {
         FmtSrc {
             src,
@@ -1709,12 +1766,42 @@ impl BasicBlock {
         self.instrs = instrs.into_iter().flat_map(map).collect();
     }
 
+    // SAFETY: The caller must guarantee that:
+    //
+    //  - For each `i in 0..instrs.len()`, `remap_idx(i)` returns `None` or
+    //    `Some(j)` where `(0..count).contains(j)`
+    //
+    //  - For each `j in 0..count`, `Some(j)` is returned exactly once
+    //
+    pub unsafe fn reorder_instrs(
+        &mut self,
+        remap_ip: impl Fn(usize) -> Option<usize>,
+        count: usize,
+    ) {
+        let instrs = std::mem::take(&mut self.instrs);
+
+        self.instrs.reserve(count);
+        let uninit = self.instrs.spare_capacity_mut();
+
+        for (ip, instr) in instrs.into_iter().enumerate() {
+            if let Some(r) = remap_ip(ip) {
+                uninit[r].write(instr);
+            }
+        }
+
+        unsafe { self.instrs.set_len(count) };
+    }
+
     pub fn is_prelude_instr(instr: &Instr) -> bool {
         matches!(&instr.op, Op::PhiDst(_) | Op::RegIn(_))
     }
 
     pub fn is_postlude_instr(instr: &Instr) -> bool {
-        matches!(&instr.op, Op::Branch(_) | Op::PhiSrc(_) | Op::RegOut(_))
+        match &instr.op {
+            Op::Branch(_) | Op::PhiSrc(_) | Op::RegOut(_) => true,
+            Op::Nop(_) => instr.flow.get_end_shader(),
+            _ => false,
+        }
     }
 
     pub fn is_branch_instr(instr: &Instr) -> bool {
@@ -1741,6 +1828,13 @@ impl BasicBlock {
             }
         }
         0
+    }
+
+    /// Returns the IP range of the instructions that make up this block's body.
+    /// These are all the instructions after the prelude but before the
+    /// postlude.
+    pub fn body_ip_range(&self) -> Range<usize> {
+        self.prelude_end_ip()..self.postlude_start_ip()
     }
 
     /// Returns the ip of the OpBranch or the end of the block.
@@ -1839,12 +1933,29 @@ pub struct ShaderInfo {
     pub has_ld_gclk: bool,
 }
 
+impl ShaderInfo {
+    pub fn add_preload(&mut self, reg: &RegRef) {
+        debug_assert!(reg.bytes() % 4 == 0);
+        for i in 0..(reg.bytes() / 4) {
+            self.register_preload |= 1 << (reg.idx + i);
+        }
+    }
+}
+
+/// Constant data from nir_opt_large_constants, appended to the shader
+/// binary at encode time and addressed PC-relative through its label.
+pub struct ConstantPool {
+    pub label: Label,
+    pub data: Vec<u8>,
+}
+
 pub struct Shader<'a> {
     pub model: &'a dyn Model,
     pub ssa_alloc: SSAValueAllocator,
     pub phi_alloc: PhiAllocator,
     pub blocks: CFG<BasicBlock>,
     pub info: ShaderInfo,
+    pub constant_pool: Option<ConstantPool>,
 }
 
 impl Shader<'_> {
@@ -1886,7 +1997,8 @@ impl fmt::Display for Shader<'_> {
         }
 
         // Pad to correct width
-        let max_eq = buf.lines().filter_map(|l| l.find('=')).max().unwrap_or(0);
+        let eq_pos = |s: &str| s.chars().position(|c| c == '=');
+        let max_eq = buf.lines().filter_map(eq_pos).max().unwrap_or(0);
 
         for line in buf.lines() {
             let line = line.trim_end();
@@ -1894,7 +2006,7 @@ impl fmt::Display for Shader<'_> {
                 writeln!(f)?;
             } else if line.starts_with("__") {
                 writeln!(f, "{line}")?;
-            } else if let Some(pos) = line.find('=') {
+            } else if let Some(pos) = eq_pos(line) {
                 writeln!(f, "{:pad$}{line}", "", pad = max_eq - pos)?;
             } else {
                 writeln!(

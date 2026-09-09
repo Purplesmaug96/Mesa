@@ -98,6 +98,7 @@ fn nir_opts(arch: u8, merge_wg: bool) -> nir_shader_compiler_options {
             0
         },
         lower_mediump_io: Some(pan_nir_lower_mediump_io),
+        io_options: nir_io_has_intrinsics | nir_io_non_interpolated_as_uint,
         ..Default::default()
     }
 }
@@ -219,8 +220,11 @@ pub extern "C" fn kraid_compile_nir(
     pass!(s.lower_mkvec_swz());
     pass!(s.opt_dce());
     pass!(s.lower_small_constants());
-    pass!(s.opt_promote_consts(&mut info.fau));
+    if inputs.fau.promote_immediates {
+        pass!(s.opt_promote_consts(&mut info.fau));
+    }
     pass!(s.legalize());
+    pass!(s.schedule_for_pressure());
     // Shader::assign_registers() uses pass!() internally
     s.assign_registers();
     pass!(s.lower_copy());
@@ -237,12 +241,13 @@ pub extern "C" fn kraid_compile_nir(
     pass!(s.opt_end());
 
     if !s.is_empty() {
-        info.stats = s.get_stats();
-
         let bin = model.encode_shader(&s);
+        let code_size = std::mem::size_of_val(&bin[..]);
         dynarray_append_vec(binary, bin);
 
         encode_no_psiz_variant(nir, &mut s, model.as_ref(), binary, info);
+
+        info.stats = s.get_stats(code_size.try_into().unwrap());
     } else {
         info.stats = pan_stats::default();
     }

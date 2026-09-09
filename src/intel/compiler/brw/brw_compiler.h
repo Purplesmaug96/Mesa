@@ -18,7 +18,9 @@
 #include "util/shader_stats.h"
 #include "util/u_math.h"
 #include "brw_isa_info.h"
+#include "compiler/intel_nir.h"
 #include "compiler/intel_shader_enums.h"
+#include "compiler/intel_nir.h"
 #include "nir_shader_compiler_options.h"
 
 #ifdef __cplusplus
@@ -234,13 +236,21 @@ struct brw_base_prog_key {
     */
    uint32_t view_mask;
 
+   /** Use efficient 64bit bit mode
+    *
+    * Gfx35+ only.
+    */
+   bool use_efficient_64bit : 1;
+
    enum brw_robustness_flags robust_flags:3;
 
    enum intel_vue_layout vue_layout:2;
 
    enum brw_divergent_atomics_flags divergent_atomics_flags:2;
 
-   uint32_t padding:25;
+   enum intel_atomic_branch_cases atomic_branch_flags:3;
+
+   uint32_t padding:21;
 };
 
 /**
@@ -600,6 +610,18 @@ struct brw_fs_prog_data {
 
    /** Whether this shader uses the FS config push data value */
    bool uses_fs_config;
+
+   /** Whether this shader uses the FS color offset push data value
+    *
+    * Efficient 64bit mode only
+    */
+   bool uses_fs_color_offset;
+
+   /** Whether this shader uses the FS color map push data value
+    *
+    * Efficient 64bit mode only
+    */
+   bool uses_fs_color_map;
 
    /** Should this shader be dispatched per-sample */
    bool persample_dispatch;
@@ -1360,6 +1382,9 @@ struct brw_compile_fs_params {
     */
    void *wa_18019110168_data;
    nir_def *(*wa_18019110168_load_per_primitive_remap_table_offset)(nir_builder *b, void *data);
+
+   void *rt_write_data;
+   intel_nir_rt_write_cb rt_write_cb;
 };
 
 /**
@@ -1444,7 +1469,7 @@ brw_stage_has_packed_dispatch(ASSERTED const struct intel_device_info *devinfo,
     * enabled by setting the macro below to true.
     */
    #define ENABLE_TEST_DISPATCH_PACKING false
-   assert(devinfo->ver <= 30);
+   assert(devinfo->ver <= 35);
 
    switch (stage) {
    case MESA_SHADER_FRAGMENT: {

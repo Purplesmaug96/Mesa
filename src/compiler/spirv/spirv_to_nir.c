@@ -863,7 +863,10 @@ vtn_handle_debug_printf(struct vtn_builder *b, SpvOp ext_opcode,
       for (uint32_t i = 0; i < argc; i++) {
          struct vtn_ssa_value *arg = vtn_ssa_value(b, w[6 + i]);
 
-         fields[i].type = glsl_intN_t_type(arg->def->bit_size);
+         if (arg->def->bit_size == 1)
+            fields[i].type = glsl_bool_type();
+         else
+            fields[i].type = glsl_intN_t_type(arg->def->bit_size);
          if (arg->def->num_components > 1)
             fields[i].type = glsl_vector_type(fields[i].type->base_type, arg->def->num_components);
 
@@ -873,7 +876,8 @@ vtn_handle_debug_printf(struct vtn_builder *b, SpvOp ext_opcode,
          unsigned num_components =
             arg->def->num_components == 3 ? 4 : arg->def->num_components;
 
-         int size = (int) arg->def->bit_size * num_components / 8;
+         unsigned bit_size = arg->def->bit_size == 1 ? 32 : arg->def->bit_size;
+         int size = (int) bit_size * num_components / 8;
          info->arg_sizes[i] = size;
 
          /* Match u_printf_impl, which 4-aligns each argument as it reads. */
@@ -3711,6 +3715,7 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
 
    nir_deref_instr *image = NULL, *sampler = NULL;
    struct vtn_value *sampled_val = vtn_untyped_value(b, w[3]);
+   struct vtn_value *sampled_val_2 = NULL;
    if (sampled_val->type->base_type == vtn_base_type_sampled_image) {
       struct vtn_sampled_image si = vtn_get_sampled_image(b, w[3]);
       image = si.image;
@@ -4095,8 +4100,8 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
    if (opcode == SpvOpImageSampleWeightedQCOM ||
        opcode == SpvOpImageBlockMatchSADQCOM ||
        opcode == SpvOpImageBlockMatchSSDQCOM) {
-      struct vtn_value *sampled_val = vtn_untyped_value(b, w[idx]);
-      if (sampled_val->type->base_type == vtn_base_type_sampled_image) {
+      sampled_val_2 = vtn_untyped_value(b, w[idx]);
+      if (sampled_val_2->type->base_type == vtn_base_type_sampled_image) {
          struct vtn_sampled_image si = vtn_get_sampled_image(b, w[idx]);
          (*p++) = nir_tex_src_for_ssa(nir_tex_src_texture_2_deref, &si.image->def);
          (*p++) = nir_tex_src_for_ssa(nir_tex_src_sampler_2_deref, &si.sampler->def);
@@ -4252,6 +4257,14 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
 
    if (sampler && (access & ACCESS_NON_UNIFORM))
       instr->sampler_non_uniform = true;
+
+   if (sampled_val_2 &&
+       (vtn_value_is_non_uniform(b, sampled_val_2) ||
+        sampled_val_2->propagated_non_uniform ||
+        b->options->workarounds.force_tex_non_uniform)) {
+      instr->texture_2_non_uniform = true;
+      instr->sampler_2_non_uniform = true;
+   }
 
    /* for non-query ops, get dest_type from SPIR-V return type */
    if (dest_type == nir_type_invalid) {

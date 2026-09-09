@@ -26,6 +26,8 @@
 #include "sfn_shader_gs.h"
 #include "sfn_shader_tess.h"
 #include "sfn_shader_vs.h"
+
+#include "pipe/p_shader_tokens.h"
 #include "util/u_math.h"
 
 #include <numeric>
@@ -117,8 +119,8 @@ ShaderInput::do_print(std::ostream& os) const
 }
 
 void
-ShaderInput::set_interpolator(int interp,
-                              int interp_loc,
+ShaderInput::set_interpolator(glsl_interp_mode interp,
+                              r600_interp_location interp_loc,
                               bool uses_interpolate_at_centroid)
 {
    m_interpolator = interp;
@@ -258,8 +260,8 @@ Shader::read_input(std::istream& is)
 {
    ShaderInput input;
 
-   int interp = 0;
-   int interp_loc = 0;
+   glsl_interp_mode interp = INTERP_MODE_NONE;
+   r600_interp_location interp_loc = R600_INTERP_LOC_SAMPLE;
    bool use_centroid = false;
 
    std::string token;
@@ -273,10 +275,10 @@ Shader::read_input(std::istream& is)
          input.set_no_varying(true);
       else if (int_from_string_with_prefix_optional(token, "SYSVALUE:", value))
          input.set_system_value(static_cast<gl_system_value>(value));
-      else if (int_from_string_with_prefix_optional(token, "INTERP:", interp))
-         ;
-      else if (int_from_string_with_prefix_optional(token, "ILOC:", interp_loc))
-         ;
+      else if (token.compare(0, 7, "INTERP:") == 0)
+         interp = static_cast<glsl_interp_mode>(atoi(token.c_str() + 7));
+      else if (token.compare(0, 5, "ILOC:") == 0)
+         interp_loc = static_cast<r600_interp_location>(atoi(token.c_str() + 5));
       else if (token == "USE_CENTROID")
          use_centroid = true;
       else {
@@ -578,9 +580,6 @@ Shader::scan_uniforms(nir_variable *uniform)
       int natomics = glsl_atomic_size(uniform->type) / 4; /* ATOMIC_COUNTER_SIZE */
       m_nhwatomic += natomics;
 
-      if (glsl_type_is_array(uniform->type))
-         m_indirect_files |= 1 << TGSI_FILE_HW_ATOMIC;
-
       m_flags.set(sh_uses_atomics);
 
       r600_shader_atomic atom = {0};
@@ -605,9 +604,7 @@ Shader::scan_uniforms(nir_variable *uniform)
 
    auto type = glsl_without_array(uniform->type);
    if (glsl_type_is_image(type) || uniform->data.mode == nir_var_mem_ssbo) {
-      m_flags.set(sh_uses_images);
-      if (glsl_type_is_array(uniform->type) && !(uniform->data.mode == nir_var_mem_ssbo))
-         m_indirect_files |= 1 << TGSI_FILE_IMAGE;
+      m_flags.set(sh_uses_images);      
    }
 
    return true;
@@ -1687,7 +1684,6 @@ Shader::load_ubo(nir_intrinsic_instr *instr)
          ir = new AluInstr(op1_mov, dest, u, AluInstr::write);
          emit_instruction(ir);
       }
-      m_indirect_files |= 1 << TGSI_FILE_CONSTANT;
       return true;
    }
 }
@@ -1829,12 +1825,6 @@ Shader::get_shader_info(r600_shader *sh_info)
    for (unsigned i = 0; i < m_atomics.size(); ++i)
       sh_info->atomics[i] = m_atomics[i];
 
-   if (m_flags.test(sh_indirect_const_file))
-      sh_info->indirect_files |= 1 << TGSI_FILE_CONSTANT;
-
-   if (m_flags.test(sh_indirect_atomic))
-      sh_info->indirect_files |= 1 << TGSI_FILE_HW_ATOMIC;
-
    sh_info->uses_tex_buffers = m_flags.test(sh_uses_tex_buffer);
 
    value_factory().get_shader_info(sh_info);
@@ -1844,7 +1834,6 @@ Shader::get_shader_info(r600_shader *sh_info)
    sh_info->uses_atomics = m_flags.test(sh_uses_atomics);
    sh_info->disable_sb = m_flags.test(sh_disble_sb);
    sh_info->has_resinfo_via_uniform = m_flags.test(sh_resinfo_via_uniform);
-   sh_info->indirect_files = m_indirect_files;
    do_get_shader_info(sh_info);
 }
 

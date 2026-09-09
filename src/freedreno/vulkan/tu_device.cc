@@ -1262,15 +1262,10 @@ tu_get_properties(struct tu_physical_device *pdevice,
       props->maxComputeWorkGroupCount[2] = 65535;
    props->maxComputeWorkGroupInvocations =
       tu_subgroup_size(pdevice) * pdevice->info->max_waves;
-   if (pdevice->info->props.is_a702) {
-      props->maxComputeWorkGroupSize[0] =
-         props->maxComputeWorkGroupSize[1] = 512;
-      props->maxComputeWorkGroupSize[2] = 64;
-   } else {
-      props->maxComputeWorkGroupSize[0] =
-         props->maxComputeWorkGroupSize[1] =
-         props->maxComputeWorkGroupSize[2] = 1024;
-   }
+   props->maxComputeWorkGroupSize[0] =
+      props->maxComputeWorkGroupSize[1] =
+      props->maxComputeWorkGroupSize[2] =
+         MIN2(1024, props->maxComputeWorkGroupInvocations);
    props->subPixelPrecisionBits = 8;
    props->subTexelPrecisionBits = 8;
    props->mipmapPrecisionBits = 8;
@@ -2141,10 +2136,9 @@ tu_get_system_heap_size(struct tu_physical_device *physical_device)
 }
 
 static inline VkDeviceSize
-tu_get_budget_memory(struct tu_physical_device *physical_device)
+tu_get_budget_memory(struct tu_physical_device *physical_device, uint64_t heap_used)
 {
    uint64_t heap_size = physical_device->heap.size;
-   uint64_t heap_used = p_atomic_read(&physical_device->heap.used);
 
    /*
     * Let's not incite the app to starve the system: report at most 90% of
@@ -2182,8 +2176,8 @@ tu_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice pdev,
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
          VkPhysicalDeviceMemoryBudgetPropertiesEXT *memory_budget_props =
             (VkPhysicalDeviceMemoryBudgetPropertiesEXT *) ext;
-         memory_budget_props->heapUsage[0] = physical_device->heap.used;
-         memory_budget_props->heapBudget[0] = tu_get_budget_memory(physical_device);
+         memory_budget_props->heapUsage[0] = p_atomic_read(&physical_device->heap.used);
+         memory_budget_props->heapBudget[0] = tu_get_budget_memory(physical_device, memory_budget_props->heapUsage[0]);
 
          /* The heapBudget and heapUsage values must be zero for array elements
           * greater than or equal to VkPhysicalDeviceMemoryProperties::memoryHeapCount
@@ -2214,7 +2208,7 @@ tu_GetPhysicalDeviceFragmentShadingRatesKHR(
    {                                                                                \
       VkPhysicalDeviceFragmentShadingRateKHR rate = {                               \
          .sType =                                                                   \
-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR, \
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_KHR,            \
          .sampleCounts = s,                                                         \
          .fragmentSize = { .width = w, .height = h },                               \
       };                                                                            \
@@ -2240,11 +2234,7 @@ tu_GetPhysicalDeviceFragmentShadingRatesKHR(
 uint64_t
 tu_device_ticks_to_ns(struct tu_device *dev, uint64_t ts)
 {
-   /* This is based on the 19.2MHz always-on rbbm timer.
-    *
-    * TODO we should probably query this value from kernel..
-    */
-   return ts * (1000000000 / 19200000);
+   return fd_ticks_to_ns(ts);
 }
 
 struct u_trace_context *
@@ -2803,8 +2793,11 @@ tu_device_destroy_mutexes(struct tu_device *device)
    mtx_destroy(&device->trace_mutex);
    mtx_destroy(&device->fiber_pvtmem_bo.mtx);
    mtx_destroy(&device->wave_pvtmem_bo.mtx);
+   mtx_destroy(&device->vis_stream_mtx);
+   mtx_destroy(&device->vis_stream_suballocator_mtx);
    mtx_destroy(&device->mutex);
    mtx_destroy(&device->copy_timestamp_cs_pool_mutex);
+   mtx_destroy(&device->softfloat_mutex);
    for (unsigned i = 0; i < ARRAY_SIZE(device->scratch_bos); i++)
       mtx_destroy(&device->scratch_bos[i].construct_mtx);
 
@@ -3035,9 +3028,17 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       }
    }
 
-   /* initial sizes, these will increase if there is overflow */
-   device->vsc_draw_strm_pitch = 0x1000 + VSC_PAD;
-   device->vsc_prim_strm_pitch = 0x4000 + VSC_PAD;
+   /* initial sizes, these will increase if there is overflow.  If GMEM_WARMUP
+    * is set, we pre-allocate a large VSC space so that performance testing can
+    * get real data for GMEM without having to loop frames too many times.
+    */
+   if (TU_DEBUG(GMEM_WARMUP)) {
+      device->vsc_draw_strm_pitch = 0x4000  + VSC_PAD;
+      device->vsc_prim_strm_pitch = 0x80000 + VSC_PAD;
+   } else {
+      device->vsc_draw_strm_pitch = 0x1000 + VSC_PAD;
+      device->vsc_prim_strm_pitch = 0x4000 + VSC_PAD;
+   }
 
    if (device->vk.enabled_features.customBorderColors)
       global_size += TU_BORDER_COLOR_COUNT * sizeof(struct bcolor_entry);
@@ -3271,10 +3272,10 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
 fail_timeline_cond:
 fail_a725_workaround:
-fail_autotune:
-   fd_perfcntr_state_free(device->perfcntrs);
-   delete device->autotune;
 fail_bin_preamble:
+fail_autotune:
+   delete device->autotune;
+   fd_perfcntr_state_free(device->perfcntrs);
 fail_prepare_perfcntrs_pass_cs:
    free(device->perfcntrs_pass_cs_entries);
 fail_perfcntrs_pass_entries_alloc:
@@ -4024,7 +4025,8 @@ tu_get_msrtss_temporary(struct tu_device *dev,
    struct tu_device_memory *mem;
    VkResult result =
       tu_create_memory(dev, &mem,
-                       depth ? (VkMemoryPropertyFlags)0 :
+                       (depth || !dev->physical_device->has_lazy_bos) ?
+                       (VkMemoryPropertyFlags)0 :
                        VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT,
                        TU_BO_ALLOC_INTERNAL_RESOURCE,
                        size, depth ? "MSRTSS depth" : "MSRTSS color");

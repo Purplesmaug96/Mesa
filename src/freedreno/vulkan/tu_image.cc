@@ -672,8 +672,7 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
          if (!device->physical_device->info->props
                  .supports_linear_mipmap_threshold_in_blocks &&
              vk_format_is_compressed(image->vk.format) &&
-             pCreateInfo->usage &
-                VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT &&
+             pCreateInfo->flags & VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT &&
              format_list_has_uncompressed_format(fmt_list)) {
             force_disable_linear_fallback = true;
          }
@@ -1042,8 +1041,8 @@ tu_CreateImage(VkDevice _device,
                               OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT);
       if (replay_info && replay_info->opaqueCaptureDescriptorData) {
          flags |= TU_SPARSE_VMA_REPLAYABLE;
-         client_address =
-            *(const uint64_t *)replay_info->opaqueCaptureDescriptorData;
+         memcpy(&client_address, replay_info->opaqueCaptureDescriptorData,
+                sizeof(client_address));
       }
 
       result = tu_sparse_vma_init(device, &image->vk.base, &image->vma,
@@ -1304,9 +1303,10 @@ tu_GetPhysicalDeviceSparseImageFormatProperties2(
       vk_format_to_pipe_format(pFormatInfo->format);
 
    if (pFormatInfo->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
-      u_foreach_bit (aspect, aspects) {
+      u_foreach_bit (b, aspects) {
+         VkImageAspectFlags aspect = BIT(b);
          enum pipe_format aspect_format =
-            tu6_plane_format(pFormatInfo->format, aspect);
+            tu6_plane_format(pFormatInfo->format, tu6_plane_index(pFormatInfo->format, aspect));
          vk_outarray_append_typed(VkSparseImageFormatProperties2, &out, props) {
             props->properties =
                tu_fill_sparse_image_fmt_props(aspect, aspect_format,
@@ -1361,7 +1361,8 @@ tu_get_image_sparse_memory_requirements(
       return;
 
    if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
-      u_foreach_bit (aspect, image->vk.aspects) {
+      u_foreach_bit (b, image->vk.aspects) {
+         VkImageAspectFlags aspect = BIT(b);
          const struct fdl_layout *layout =
             &image->layout[tu6_plane_index(image->vk.format, aspect)];
          vk_outarray_append_typed(VkSparseImageMemoryRequirements2, &out, reqs) {
@@ -1458,12 +1459,14 @@ tu_get_image_subresource_layout(struct tu_image *image,
    pLayout->subresourceLayout.arrayPitch =
       fdl_layer_stride(layout, pSubresource->imageSubresource.mipLevel);
    pLayout->subresourceLayout.depthPitch = slice->size0;
-   pLayout->subresourceLayout.size = slice->size0 * layout->depth0;
+   pLayout->subresourceLayout.size = slice->size0;
+   if (image->vk.image_type == VK_IMAGE_TYPE_3D)
+      pLayout->subresourceLayout.size *= u_minify(layout->depth0, pSubresource->imageSubresource.mipLevel);
 
    VkSubresourceHostMemcpySizeEXT *memcpy_size =
       vk_find_struct(pLayout, SUBRESOURCE_HOST_MEMCPY_SIZE_EXT);
    if (memcpy_size) {
-      memcpy_size->size = slice->size0;
+      memcpy_size->size = pLayout->subresourceLayout.size;
    }
 
    VkImageCompressionPropertiesEXT *compression_props =
@@ -1605,7 +1608,7 @@ tu_GetImageOpaqueCaptureDescriptorDataEXT(VkDevice device,
    /* Save the image iova so that when replaying sparse images have a
     * consistent iova and therefore consistent descriptor contents.
     */
-   *(uint64_t *)pData = image->iova;
+   memcpy(pData, &image->iova, sizeof(image->iova));
    return VK_SUCCESS;
 }
 

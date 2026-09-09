@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2023 Collabora Ltd.
  * Copyright (C) 2026 Arm Ltd.
+ * Copyright (C) 2026 NXP
  * SPDX-License-Identifier: MIT
  */
 
@@ -302,13 +303,25 @@ csf_oom_handler_init(struct panfrost_context *ctx)
    cs_function_def(&b, &handler, handler_ctx) {
       struct cs_index tiler_oom_ctx = cs_reg64(&b, TILER_OOM_CTX_REG);
       struct cs_index counter = cs_reg32(&b, 31);
-      struct cs_index zero = cs_reg64(&b, 56);
-      struct cs_index flush_id = cs_reg32(&b, 58);
+      struct cs_index zero64 = cs_reg64(&b, 56);
+      /* zero32 aliases the low 32 bits of zero64 (both map to r56).
+       * Both are initialized to 0 immediately below; do not assign any
+       * other value to zero64/zero32 between here and cs_flush_caches(),
+       * and do not re-order cs_flush_caches() ahead of that initialization.
+       * A non-zero flush_id makes the hardware treat the cache flush as
+       * already completed and skip the invalidate.
+       */
+      struct cs_index zero32 = cs_reg32(&b, 56);
       struct cs_index tiler_ctx = cs_reg64(&b, 60);
       struct cs_index completed_top = cs_reg64(&b, 64);
       struct cs_index completed_bottom = cs_reg64(&b, 66);
       struct cs_index completed_chunks = cs_reg_tuple(&b, 64, 4);
       struct cs_index fbd_pointer = cs_sr_reg64(&b, FRAGMENT, FBD_POINTER);
+
+      /* Initialize zero64/zero32 to 0, zero32 is used as flush_id
+       * in cs_flush_caches() below, and zero64 is reused for the
+       * polygon-list and completed-chunks stores that follow. */
+      cs_move64_to(&b, zero64, 0);
 
       /* Ensure that the OTHER endpoint is valid */
 #if PAN_ARCH >= 11
@@ -360,15 +373,14 @@ csf_oom_handler_init(struct panfrost_context *ctx)
       cs_finish_fragment(&b, false, completed_top, completed_bottom, cs_now());
 
       /* Zero out polygon list, completed_top and completed_bottom */
-      cs_move64_to(&b, zero, 0);
-      cs_store64(&b, zero, tiler_ctx, 0);
-      cs_store64(&b, zero, tiler_ctx, 10 * 4);
-      cs_store64(&b, zero, tiler_ctx, 12 * 4);
+      cs_store64(&b, zero64, tiler_ctx, 0);
+      cs_store64(&b, zero64, tiler_ctx, 10 * 4);
+      cs_store64(&b, zero64, tiler_ctx, 12 * 4);
 
       /* We need to flush the texture caches so future preloads see the new
        * content. */
       cs_flush_caches(&b, MALI_CS_FLUSH_MODE_NONE, MALI_CS_FLUSH_MODE_NONE,
-                      MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, flush_id,
+                      MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, zero32,
                       cs_defer(0, 0));
 
       cs_wait_slot(&b, PANFROST_SB_LS);
@@ -1406,6 +1418,20 @@ GENX(csf_launch_xfb)(struct panfrost_batch *batch,
 
    /* XXX: Choose correctly */
    cs_run_compute(b, 1, MALI_TASK_AXIS_Z, cs_shader_res_sel(0, 0, 0, 0));
+
+   /* Flush GPU caches so that XFB buffer writes are visible to the
+    * subsequent vertex fetch. cs_defer(BIT(RENDER), SB_LS) makes the flush
+    * wait for the RENDER scoreboard slot (where the XFB compute ran) before
+    * executing, replacing the previously explicit cs_wait_slot(RENDER). The
+    * tiler flush mode is NONE because XFB is a pure compute pass with no
+    * tiler activity.
+    */
+   struct cs_index flush_id = cs_reg32(b, 74);
+   cs_move32_to(b, flush_id, 0);
+   cs_flush_caches(b, MALI_CS_FLUSH_MODE_CLEAN, MALI_CS_FLUSH_MODE_NONE,
+                   MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, flush_id,
+                   cs_defer(BITFIELD_BIT(PANFROST_SB_RENDER), PANFROST_SB_LS));
+   cs_wait_slot(b, PANFROST_SB_LS);
 }
 
 static void

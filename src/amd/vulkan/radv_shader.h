@@ -55,10 +55,9 @@ typedef struct nir_parameter nir_parameter;
 
 enum radv_nggc_settings {
    radv_nggc_none = 0,
-   radv_nggc_front_face = 1 << 0,
-   radv_nggc_back_face = 1 << 1,
-   radv_nggc_face_is_ccw = 1 << 2,
-   radv_nggc_small_primitives = 1 << 3,
+   radv_nggc_cull_face_negative_determinant = 1 << 0,
+   radv_nggc_cull_face_positive_determinant = 1 << 1,
+   radv_nggc_small_primitives = 1 << 2,
 };
 
 enum radv_shader_query_state {
@@ -156,7 +155,6 @@ struct radv_graphics_state_key {
       uint8_t vertex_attribute_formats[MAX_VERTEX_ATTRIBS];
       uint32_t vertex_attribute_bindings[MAX_VERTEX_ATTRIBS];
       uint32_t vertex_attribute_offsets[MAX_VERTEX_ATTRIBS];
-      uint32_t vertex_attribute_strides[MAX_VERTEX_ATTRIBS];
       uint8_t vertex_binding_align[MAX_VBS];
    } vi;
 
@@ -167,6 +165,8 @@ struct radv_graphics_state_key {
    struct {
       uint32_t provoking_vtx_last : 1;
       uint32_t cull_mode : 2;
+      bool skip_ngg_cull_face : 1;
+      bool skip_all_ngg_culling : 1;
       bool rasterizer_discard : 1;
       bool polygon_mode_unknown : 1;
       uint8_t polygon_mode : 2; /* VK_POLYGON_MODE_FILL/LINE_POINT */

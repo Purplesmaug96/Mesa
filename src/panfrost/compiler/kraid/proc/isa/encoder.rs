@@ -9,11 +9,14 @@ use quote::ToTokens;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-// We assume FAU index and flow will be handled elsewhere
+// The variable FAU page and flow are set at encode time from the sources and
+// the scheduled flow. A field pinned to an exact value (e.g. ADR, which reads
+// the PC on page 3) is a constant and must still be emitted here.
 fn skip_field(field: &InstrField) -> bool {
     match field {
         InstrField::Physical(f) => match f.name.as_str() {
-            "fau_page_index" | "flow" => true,
+            "fau_page_index" => f.expr.is_none(),
+            "flow" => true,
             _ => false,
         },
         _ => false,
@@ -1006,6 +1009,10 @@ impl InstrEncVariant {
                     // Physical fields only show up as sources if we can't
                     // automatically calculate them.
                     if f.expr.is_some() {
+                        // A hardcoded slot (exact="slot0") is still a message
+                        if f.name == "message_slot_index" {
+                            info.is_message = true;
+                        }
                         continue;
                     }
                     let restrict = f.restrict.clone();

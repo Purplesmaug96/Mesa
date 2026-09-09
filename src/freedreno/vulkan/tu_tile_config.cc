@@ -254,14 +254,16 @@ try_merge_tiles(struct tu_tile_config *dst, struct tu_tile_config *src,
          return false;
    }
 
-   /* The tiles must be vertically or horizontally adjacent and have the
-    * compatible width/height.
+   /* The tiles must be vertically or horizontally adjacent, with matching
+    * extent across the merge axis so the combined tile stays rectangular:
+    * a same-column merge keeps dst's width, so the widths must be equal,
+    * and vice versa.
     */
    if (dst->pos.x == src->pos.x) {
-      if (dst->sysmem_extent.height != src->sysmem_extent.height)
+      if (dst->sysmem_extent.width != src->sysmem_extent.width)
          return false;
    } else if (dst->pos.y == src->pos.y) {
-      if (dst->sysmem_extent.width != src->sysmem_extent.width)
+      if (dst->sysmem_extent.height != src->sysmem_extent.height)
          return false;
    } else {
       return false;
@@ -794,7 +796,7 @@ tu_calc_tile_config(struct tu_cmd_buffer *cmd, const struct tu_vsc_config *vsc,
        vsc->tile_count.width * vsc->tile_count.height <= TU_SUBSAMPLED_MAX_BINS) {
       tu_calc_subsampled(tiles, cmd->device->physical_device,
                          cmd->state.tiling, cmd->state.framebuffer,
-                         vsc, fdm_offsets,
+                         vsc, cmd->state.rp.shared_viewport ? NULL : fdm_offsets,
                          cmd->state.fdm_custom_resolve_subsampled);
    }
 

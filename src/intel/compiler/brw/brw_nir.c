@@ -2299,11 +2299,7 @@ brw_nir_optimize(brw_pass_tracker *pt)
          LOOP_OPT_NOT_IDEMPOTENT(nir_opt_loop_unroll);
       }
       LOOP_OPT(nir_opt_remove_phis);
-      /* Don't hoist texture instructions out of large loops: it extends the
-       * texel results' live ranges across the whole loop and can spike
-       * register pressure enough to lower dispatch width or occupancy.
-       */
-      LOOP_OPT(nir_opt_gcm, false, false);
+      LOOP_OPT(nir_opt_gcm, false);
       LOOP_OPT(nir_opt_undef);
       LOOP_OPT(nir_lower_pack);
 
@@ -3342,7 +3338,7 @@ brw_vectorize_lower_mem_access(brw_pass_tracker *pt)
       OPT(nir_opt_constant_folding);
       OPT(nir_opt_copy_prop);
 
-      if (OPT(brw_nir_rebase_const_offset_ubo_loads)) {
+      if (OPT(intel_nir_rebase_const_offset_ubo_loads)) {
          OPT(nir_opt_cse);
          OPT(nir_opt_copy_prop);
 
@@ -3385,10 +3381,10 @@ brw_vectorize_lower_mem_access(brw_pass_tracker *pt)
       OPT(intel_nir_lower_scratch);
    }
 
-   /* Do this after the vectorization & brw_nir_rebase_const_offset_ubo_loads
+   /* Do this after the vectorization & intel_nir_rebase_const_offset_ubo_loads
     * so that we maximize the offset put into the messages.
     */
-   if (devinfo->ver >= 20) {
+   if (brw_lsc_supports_base_offset(devinfo)) {
       OPT(brw_nir_ssbo_intel);
 
       const nir_opt_offsets_options offset_options = {
@@ -3399,7 +3395,7 @@ brw_vectorize_lower_mem_access(brw_pass_tracker *pt)
       };
       OPT(nir_opt_offsets, &offset_options);
 
-      OPT(brw_nir_lower_immediate_offsets);
+      OPT(brw_nir_lower_immediate_offsets, pt->key->use_efficient_64bit);
    }
 }
 
@@ -3577,6 +3573,14 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt)
    const struct intel_device_info *devinfo = compiler->devinfo;
    nir_shader *nir = pt->nir;
 
+   /* Run after the driver has selected SSBO versus global addressing and
+    * lowered image deref atomics, but before the late optimization/lowering
+    * sequence so the inserted control flow can still be cleaned up.
+    */
+   const unsigned enabled_cases = pt->key->atomic_branch_flags;
+   if (enabled_cases != 0)
+      OPT(intel_nir_opt_atomic_branch, enabled_cases);
+
    const nir_lower_tex_options tex_options = {
       .lower_txp = ~0,
       .lower_txf_offset = true,
@@ -3618,6 +3622,9 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt)
    OPT(brw_nir_lower_texture);
 
    OPT(nir_lower_bit_size, lower_bit_size_callback, (void *)devinfo);
+
+   if (pt->key->use_efficient_64bit)
+      OPT(intel_nir_lower_vec2_surface_sampler);
 
    OPT(nir_opt_combine_barriers, combine_all_memory_barriers, NULL);
 

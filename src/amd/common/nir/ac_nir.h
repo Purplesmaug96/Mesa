@@ -227,6 +227,7 @@ typedef struct {
    bool has_gs_primitives_query;
    bool force_vrs;
    bool compact_primitives;
+   bool skip_face_culling;
    /* Skip culling dependent on the viewport state, which is frustum culling and small prim
     * culling. Set this when the shader writes the viewport index.
     */
@@ -521,6 +522,9 @@ ac_nir_assign_fs_input_locations(nir_shader *nir);
 
 bool
 ac_nir_fixup_smem_loads_null_prt(nir_shader *shader, uint8_t address_prt_wa_control_bit);
+
+bool
+ac_nir_lower_fs_input_loads(nir_shader *nir, const struct ac_shader_args *args);
 
 #ifdef __cplusplus
 }

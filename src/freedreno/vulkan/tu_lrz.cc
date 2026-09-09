@@ -206,10 +206,7 @@ tu_lrz_emit_force_disable_for_rp(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    if (CHIP >= A7XX) {
       const struct tu_reg_value reg = GRAS_SC_BIN_CNTL(CHIP, .force_lrz_dis = true);
 
-      tu_cs_emit_pkt7(cs, CP_REG_RMW, 3);
-      tu_cs_emit(cs, CP_REG_RMW_0_DST_REG(reg.reg));
-      tu_cs_emit(cs, ~0u);
-      tu_cs_emit(cs, reg.value);
+      cs->rmw(reg, { .src0 = ~0u, .src1 = reg.value });
    } else {
       /* A6XX does not support GRAS_SC_BIN_CNTL.FORCE_LRZ_DIS */
       tu6_write_lrz_reg(cmd, cs, A6XX_GRAS_LRZ_VIEW_INFO(
@@ -853,6 +850,7 @@ tu_lrz_before_sysmem_br(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
          const unsigned if_dwords = 4, else_dwords = if_dwords;
          uint64_t lrz_fc_iova =
             lrz->image_view->image->iova + lrz->image_view->image->lrz_layout.lrz_fc_offset;
+         // FIXME hard-coding A7XX here and below is wrong!
          uint64_t br_cur_buffer_iova =
             lrz_fc_iova + offsetof(fd_lrzfc_layout<A7XX>, br_cur_buffer);
 
@@ -869,17 +867,14 @@ tu_lrz_before_sysmem_br(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
          tu_cs_emit(cs, 2); /* REF */
          tu_cs_emit(cs, if_dwords + 1);
          /*    GRAS_LRZ_DEPTH_CLEAR = lrz_fc->buffer[1].depth_clear_val */
-         tu_cs_emit_pkt7(cs, CP_MEM_TO_REG, 3);
-         tu_cs_emit(cs, CP_MEM_TO_REG_0_REG(GRAS_LRZ_DEPTH_CLEAR(CHIP).reg));
-         tu_cs_emit_qw(cs, lrz_fc_iova + offsetof(fd_lrzfc_layout<A7XX>,
-                                                  buffer[1].depth_clear_val));
+         cs->mem_to_reg(GRAS_LRZ_DEPTH_CLEAR(CHIP),
+                        lrz_fc_iova + offsetof(fd_lrzfc_layout<A7XX>, buffer[1].depth_clear_val));
+
          /* } else { */
          tu_cs_emit_pkt7(cs, CP_NOP, else_dwords);
          /*    GRAS_LRZ_DEPTH_CLEAR = lrz_fc->buffer[0].depth_clear_val */
-         tu_cs_emit_pkt7(cs, CP_MEM_TO_REG, 3);
-         tu_cs_emit(cs, CP_MEM_TO_REG_0_REG(GRAS_LRZ_DEPTH_CLEAR(CHIP).reg));
-         tu_cs_emit_qw(cs, lrz_fc_iova + offsetof(fd_lrzfc_layout<A7XX>,
-                                                  buffer[0].depth_clear_val));
+         cs->mem_to_reg(GRAS_LRZ_DEPTH_CLEAR(CHIP),
+                        lrz_fc_iova + offsetof(fd_lrzfc_layout<A7XX>, buffer[0].depth_clear_val));
          /* } */
       }
    }
@@ -1120,15 +1115,8 @@ tu_lrz_emit_disable_write_for_rp(struct tu_cs *cs)
    const struct tu_reg_value gras_cs_bin_cntl = GRAS_SC_BIN_CNTL(CHIP, .force_lrz_write_dis = true);
    const struct tu_reg_value rb_cntl = RB_CNTL(CHIP, .force_lrz_write_dis = true);
 
-   tu_cs_emit_pkt7(cs, CP_REG_RMW, 3);
-   tu_cs_emit(cs, CP_REG_RMW_0_DST_REG(gras_cs_bin_cntl.reg));
-   tu_cs_emit(cs, ~0u);
-   tu_cs_emit(cs, gras_cs_bin_cntl.value);
-
-   tu_cs_emit_pkt7(cs, CP_REG_RMW, 3);
-   tu_cs_emit(cs, CP_REG_RMW_0_DST_REG(rb_cntl.reg));
-   tu_cs_emit(cs, ~0u);
-   tu_cs_emit(cs, rb_cntl.value);
+   cs->rmw(gras_cs_bin_cntl, { .src0 = ~0u, .src1 = gras_cs_bin_cntl.value });
+   cs->rmw(rb_cntl, { .src0 = ~0u, .src1 = rb_cntl.value });
 
    tu_cond_exec_end(cs);
 }

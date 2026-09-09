@@ -713,6 +713,8 @@ cmd_buffer_maybe_flush_rt_writes(struct anv_cmd_buffer *cmd_buffer,
       }
    }
 
+   need_rt_flush &= GFX_VERx10 < 350 || !cmd_buffer->device->physical->uses_efficient_64bit;
+
    if (need_rt_flush) {
       anv_cmd_buffer_dirty_descriptors(cmd_buffer,
                                        VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -990,6 +992,7 @@ cmd_buffer_flush_gfx_state(struct anv_cmd_buffer *cmd_buffer)
 static inline void
 cmd_buffer_flush_gfx_pointers(struct anv_cmd_buffer *cmd_buffer)
 {
+   struct anv_device *device = cmd_buffer->device;
    struct anv_cmd_graphics_state *gfx = &cmd_buffer->state.gfx;
 
    assert(gfx->base != NULL);
@@ -1024,7 +1027,8 @@ cmd_buffer_flush_gfx_pointers(struct anv_cmd_buffer *cmd_buffer)
     * emitting push constants, on SKL+ we have to emit the corresponding
     * 3DSTATE_BINDING_TABLE_POINTER_* for the push constants to take effect.
     */
-   if (descriptors_dirty) {
+   if (descriptors_dirty &&
+       !(GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit)) {
       cmd_buffer->state.descriptors_pointers_dirty |=
          genX(cmd_buffer_flush_descriptor_sets)(
             cmd_buffer,
@@ -1986,8 +1990,8 @@ static inline uint32_t xi_argument_format_for_vk_cmd(enum vk_cmd_type cmd)
 #endif
 }
 
-/* Return whether EXECUTE_INDIRECT_DRAW can unroll all the draw calls or
- * whether we need to emit the max count.
+/* Return whether EXECUTE_INDIRECT_DRAW can unroll all the draw calls (returns false)
+ * or whether we need to emit the max count (returns true).
  */
 static inline bool
 cmd_buffer_set_indirect_stride(struct anv_cmd_buffer *cmd_buffer,
@@ -2036,7 +2040,7 @@ cmd_buffer_set_indirect_stride(struct anv_cmd_buffer *cmd_buffer,
    /* Gfx20+ can accomodate any stride through programming STATE_BYTE_STRIDE,
     * ARL cannot unless indirect data is aligned.
     */
-   return GFX_VER >= 20 ? false : aligned;
+   return GFX_VER >= 20 ? false : !aligned;
 }
 
 static void

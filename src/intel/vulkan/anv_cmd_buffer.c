@@ -502,14 +502,12 @@ anv_cmd_buffer_set_rt_query_buffer(struct anv_cmd_buffer *cmd_buffer,
       cmd_buffer->state.ray_query_shadow_bo = bo;
 
       /* Add the ray query buffers to the batch list. */
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
-                            cmd_buffer->state.ray_query_shadow_bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, cmd_buffer->state.ray_query_shadow_bo);
    }
 
    /* Add the HW buffer to the list of BO used. */
    assert(device->ray_query_bo[idx]);
-   anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
-                         device->ray_query_bo[idx]);
+   anv_cmd_buffer_add_reloc_bo(cmd_buffer, device->ray_query_bo[idx]);
 
    /* Fill the push constants & mark them dirty. */
    struct anv_address ray_query_globals_addr =
@@ -642,10 +640,8 @@ anv_cmd_buffer_bind_descriptor_set(struct anv_cmd_buffer *cmd_buffer,
       }
 
       /* Always add a reference to the buffers */
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
-                            set->desc_surface_addr.bo);
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
-                            set->desc_sampler_addr.bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, set->desc_surface_addr.bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, set->desc_sampler_addr.bo);
 
       dirty_stages |= stages;
    }
@@ -743,11 +739,14 @@ void anv_CmdBindDescriptorBuffersEXT(
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    struct anv_cmd_state *state = &cmd_buffer->state;
+   const struct anv_va_range *desc_va_range =
+      cmd_buffer->device->physical->uses_efficient_64bit ?
+      &cmd_buffer->device->physical->va.bindless_surface_state_pool :
+      &cmd_buffer->device->physical->va.dynamic_visible_pool;
 
    for (uint32_t i = 0; i < bufferCount; i++) {
-      assert(pBindingInfos[i].address >= anv_physical_device_get_dynamic_visible_pool_va(cmd_buffer->device->physical)->addr &&
-             pBindingInfos[i].address < (anv_physical_device_get_dynamic_visible_pool_va(cmd_buffer->device->physical)->addr +
-                                         anv_physical_device_get_dynamic_visible_pool_va(cmd_buffer->device->physical)->size));
+      assert(pBindingInfos[i].address >= desc_va_range->addr &&
+             pBindingInfos[i].address < (desc_va_range->addr + desc_va_range->size));
 
       if (state->descriptor_buffers.address[i] != pBindingInfos[i].address) {
          state->descriptor_buffers.address[i] = pBindingInfos[i].address;

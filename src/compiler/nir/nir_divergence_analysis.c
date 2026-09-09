@@ -308,9 +308,8 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_prim_xfb_query_enabled_amd:
    case nir_intrinsic_load_merged_wave_info_amd:
    case nir_intrinsic_load_clamp_vertex_color_amd:
-   case nir_intrinsic_load_cull_front_face_enabled_amd:
-   case nir_intrinsic_load_cull_back_face_enabled_amd:
-   case nir_intrinsic_load_cull_ccw_amd:
+   case nir_intrinsic_load_cull_face_negative_determinant_enabled_amd:
+   case nir_intrinsic_load_cull_face_positive_determinant_enabled_amd:
    case nir_intrinsic_load_cull_small_triangles_enabled_amd:
    case nir_intrinsic_load_cull_small_lines_enabled_amd:
    case nir_intrinsic_load_cull_any_enabled_amd:
@@ -503,7 +502,9 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
          is_divergent = true;
       break;
    case nir_intrinsic_load_input_vertex:
-      is_divergent = src_divergent(instr->src[1], state);
+   case nir_intrinsic_load_input_vertex_amd:
+      if (instr->intrinsic == nir_intrinsic_load_input_vertex)
+         is_divergent |= src_divergent(instr->src[1], state);
       assert(stage == MESA_SHADER_FRAGMENT);
       is_divergent |= !(options & nir_divergence_single_prim_per_subgroup);
       break;
@@ -924,6 +925,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_sample_id:
    case nir_intrinsic_load_sample_mask_in:
    case nir_intrinsic_load_interpolated_input:
+   case nir_intrinsic_load_interpolated_input_amd:
    case nir_intrinsic_load_point_coord_maybe_flipped:
    case nir_intrinsic_load_barycentric_pixel:
    case nir_intrinsic_load_barycentric_centroid:
@@ -1133,7 +1135,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_cumulative_coverage_pan:
    case nir_intrinsic_load_blend_input_pan:
    case nir_intrinsic_load_idvs_output_buf_index_pan:
-   case nir_intrinsic_load_raster_sample_centroid_pan:
+   case nir_intrinsic_load_sample_centroid_pan:
    case nir_intrinsic_atest_pan:
    case nir_intrinsic_zs_emit_pan:
    case nir_intrinsic_load_return_param_amd:

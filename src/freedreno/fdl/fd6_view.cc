@@ -200,9 +200,7 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
 
    view->offset = fdl_surface_offset(layout, args->base_miplevel, args->base_array_layer);
 
-   bool multi_plane = args->format == PIPE_FORMAT_R8_G8B8_420_UNORM ||
-                      args->format == PIPE_FORMAT_G8_B8R8_420_UNORM ||
-                      args->format == PIPE_FORMAT_G8_B8_R8_420_UNORM;
+   bool multi_plane = util_format_get_num_planes(args->format) > 1;
 
    bool ubwc_enabled = fdl_ubwc_enabled(layout, args->base_miplevel);
 
@@ -241,6 +239,11 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
    enum a3xx_color_swap swap =
       fd6_texture_swap(args->format, (enum a6xx_tile_mode)layout->tile_mode, layout->is_mutable);
    enum a6xx_tile_mode tile_mode = (enum a6xx_tile_mode)fdl_tile_mode(layout, args->base_miplevel);
+
+   if (ubwc_enabled && util_format_is_yuv(args->format) &&
+       util_format_get_num_planes(args->format) == 2) {
+      texture_format = FMT6_R8_G8B8_2PLANE_420_UNORM;
+   }
 
    bool is_d24s8 = (args->format == PIPE_FORMAT_Z24_UNORM_S8_UINT ||
                     args->format == PIPE_FORMAT_Z24X8_UNORM ||
@@ -315,6 +318,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          if (args->chroma_offsets[1] == FDL_CHROMA_LOCATION_MIDPOINT)
             view->descriptor[0] |= A6XX_TEX_MEMOBJ_0_CHROMA_MIDPOINT_Y;
 
+         uint32_t plane_count = util_format_get_num_planes(args->format);
+
          if (ubwc_enabled) {
             view->descriptor[3] |= A6XX_TEX_MEMOBJ_3_FLAG;
          }
@@ -323,8 +328,18 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
             A6XX_TEX_MEMOBJ_6_PLANE_PITCH(fdl_pitch(layouts[1], args->base_miplevel));
          view->descriptor[7] = base_addr[1];
          view->descriptor[8] = base_addr[1] >> 32;
-         view->descriptor[9] = base_addr[2];
-         view->descriptor[10] = base_addr[2] >> 32;
+         /* 2-plane formats (eg. NV12) interleave U and V in the second plane,
+          * so there is no separate V plane base address; the descriptor
+          * words must still be written (to zero) since callers don't
+          * necessarily zero-initialize view->descriptor themselves.
+          */
+         if (plane_count > 2) {
+            view->descriptor[9] = base_addr[2];
+            view->descriptor[10] = base_addr[2] >> 32;
+         } else {
+            view->descriptor[9] = 0;
+            view->descriptor[10] = 0;
+         }
 
          assert(args->type != FDL_VIEW_TYPE_3D);
          return;
@@ -358,8 +373,6 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
    } else if (CHIP >= A8XX) {
       uint32_t *descriptor = view->descriptor;
 
-      assert(!args->filter_width); /* Need descriptor fields defined. */
-
       descriptor[0] = A8XX_TEX_MEMOBJ_0_BASE_LO(base_addr[0]);
       descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr[0] >> 32) |
                       A8XX_TEX_MEMOBJ_1_TYPE(fdl6_tex_type(args->type, false));
@@ -378,6 +391,7 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
                       A8XX_TEX_MEMOBJ_6_MIPLVLS(args->level_count - 1);
 
       if (multi_plane) {
+         uint32_t plane_count = util_format_get_num_planes(args->format);
 
          if (ubwc_enabled) {
             descriptor[4] |= A8XX_TEX_MEMOBJ_4_FLAG;
@@ -391,9 +405,20 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          if (args->chroma_offsets[1] == FDL_CHROMA_LOCATION_MIDPOINT)
             view->descriptor[7] |= A8XX_TEX_MEMOBJ_7_UV_OFFSET_V(0.25);
 
-         descriptor[8] |= A8XX_TEX_MEMOBJ_8_BASE_V_LO(base_addr[2]);
-         descriptor[9] |= A8XX_TEX_MEMOBJ_9_BASE_V_HI(base_addr[2] >> 32) |
-                          A8XX_TEX_MEMOBJ_9_UV_PITCH(fdl_pitch(layouts[1], args->base_miplevel));
+         /* 2-plane formats (eg. NV12) interleave U and V in the second plane,
+          * so there is no separate V plane base address; BASE_V_LO/_HI must
+          * still be cleared (to zero) since callers don't necessarily
+          * zero-initialize the descriptor themselves.
+          */
+         if (plane_count > 2) {
+            descriptor[8] = A8XX_TEX_MEMOBJ_8_BASE_V_LO(base_addr[2]);
+            descriptor[9] = A8XX_TEX_MEMOBJ_9_BASE_V_HI(base_addr[2] >> 32);
+         } else {
+            descriptor[8] = 0;
+            descriptor[9] = 0;
+         }
+         descriptor[9] |=
+            A8XX_TEX_MEMOBJ_9_UV_PITCH(fdl_pitch(layouts[1], args->base_miplevel));
 
          return;
       } else {
@@ -597,7 +622,35 @@ fdl6_buffer_view_init(uint32_t *descriptor, enum pipe_format format,
 
    if (CHIP <= A7XX) {
       uint64_t base_iova = iova & ~0x3full;
-      unsigned texel_offset = (iova & 0x3f) / elem_size;
+      unsigned alignment_offset = (iova & 0x3f);
+      unsigned texel_offset = alignment_offset / elem_size;
+
+      /* Single texel alignment edge cases.
+       * For non-POT sizes, single component alignment is the requirement,
+       * and it's possible we may not be able to express the texel offset
+       * as a simple mask.
+       */
+      if (texel_offset * elem_size != alignment_offset) {
+          /* For POT sizes, alignment is equal to size of format.
+           * By shifting the address back in steps of 64, we're
+           * mathematically guaranteed to hit a case where we start
+           * aligning correctly. There is a potential risk of generating a
+           * base VA that is not inside the resource, but HW should not care.
+           * A maximum of 2 fixup steps is required which guarantees that any possible
+           * case will fall within the [0, 63] texel_offset range.
+           */
+          assert(elem_size % 3 == 0);
+          for (unsigned iter = 0; iter < 2; iter++) {
+              base_iova -= 0x40;
+              alignment_offset += 0x40;
+              texel_offset = alignment_offset / elem_size;
+              if (texel_offset * elem_size == alignment_offset)
+                  break;
+          }
+
+          assert(texel_offset * elem_size == alignment_offset);
+          assert(texel_offset < 64);
+      }
 
       descriptor[0] =
          A6XX_TEX_MEMOBJ_0_TILE_MODE(TILE6_LINEAR) |

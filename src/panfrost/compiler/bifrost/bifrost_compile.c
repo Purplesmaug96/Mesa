@@ -7,6 +7,7 @@
 
 #include "compiler/nir/nir_builder.h"
 #include "panfrost/compiler/pan_compiler.h"
+#include "util/u_hexdump.h"
 #include "util/u_qsort.h"
 
 #include "bifrost/bi_debug.h"
@@ -1518,9 +1519,9 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
       bi_mov_i32_to(b, dst, bi_preload(b, BI_PRELOAD_CUMULATIVE_COVERAGE));
       break;
 
-   case nir_intrinsic_load_raster_sample_centroid_pan:
-      /* They're all the same register */
-      bi_mov_i32_to(b, dst, bi_preload(b, BI_PRELOAD_RASTERIZER_COVERAGE));
+   case nir_intrinsic_load_sample_centroid_pan:
+      /* They're the same register */
+      bi_mov_i32_to(b, dst, bi_preload(b, BI_PRELOAD_SAMPLE_ID));
       break;
 
    case nir_intrinsic_load_blend_descriptor_pan: {
@@ -2024,7 +2025,10 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
       break;
 
    case nir_intrinsic_shader_clock:
-      bi_ld_gclk_u64_to(b, dst, BI_SOURCE_CYCLE_COUNTER);
+      bi_ld_gclk_u64_to(b, dst,
+                        nir_intrinsic_memory_scope(instr) == SCOPE_SUBGROUP
+                           ? BI_SOURCE_CYCLE_COUNTER
+                           : BI_SOURCE_SYSTEM_TIMESTAMP);
       bi_split_def(b, &instr->def);
       b->shader->info.has_ld_gclk_instr = true;
       break;
@@ -2116,6 +2120,17 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
       assert(b->shader->arch >= 12 && "load_shader_output_pan should have been lowered!");
       bi_mov_i32_to(b, dst, bi_fau(BIR_FAU_SHADER_OUTPUT, false));
       break;
+
+   case nir_intrinsic_load_constant_base_ptr: {
+      assert(b->shader->arch >= 9);
+      bi_index lo = bi_temp(b->shader);
+      bi_instr *I =
+         bi_iadd_imm_i32_to(b, lo, bi_fau(BIR_FAU_PROGRAM_COUNTER, false), 0);
+      I->patch_imm_const_offset = true;
+      bi_collect_v2i32_to(b, dst, lo,
+                          bi_mov_i32(b, bi_fau(BIR_FAU_PROGRAM_COUNTER, true)));
+      break;
+   }
 
    case nir_intrinsic_load_core_id:
       assert(b->shader->arch >= 9);
@@ -3859,15 +3874,11 @@ bi_gather_stats(bi_context *ctx, unsigned size, struct bifrost_stats *out)
    struct bi_stats counts = {0};
 
    /* Count instructions, clauses, and tuples. Also attempt to construct
-    * normalized execution engine cycle counts, using the following ratio:
-    *
-    * 24 arith tuples/cycle
-    * 2 texture messages/cycle
-    * 16 x 16-bit varying channels interpolated/cycle
-    * 1 load store message/cycle
-    *
-    * These numbers seem to match Arm Mobile Studio's heuristic. The real
-    * cycle counts are surely more complicated.
+    * normalized execution engine cycle counts. The arith (FMA tuples/clock)
+    * and texel (texels/clock) issue rates per core come from the model; the
+    * varying (16 x 16-bit channels/clock) and load/store (1 message/clock)
+    * rates are fixed. These seem to match Arm Mobile Studio's heuristic. The
+    * real cycle counts are surely more complicated.
     */
 
    bi_foreach_block(ctx, block) {
@@ -3883,12 +3894,21 @@ bi_gather_stats(bi_context *ctx, unsigned size, struct bifrost_stats *out)
    /* Thread count and register pressure are traded off only on v7 */
    bool full_threads = (ctx->arch == 7 && ctx->info.work_reg_count <= 32);
 
+   const struct pan_model *model =
+      pan_get_model(ctx->inputs->gpu_id, ctx->inputs->gpu_variant);
+   if (model == NULL) {
+      /* Get G52 by default: */
+      model = pan_get_model(((uint64_t)0x7202) << 16, 0);
+      assert(model);
+   }
+   assert(model->rates.fma && model->rates.texel);
+
    *out = (struct bifrost_stats){
       .instrs = counts.nr_ins,
       .tuples = counts.nr_tuples,
       .clauses = counts.nr_clauses,
-      .arith = ((float)counts.nr_arith) / 24.0,
-      .t = ((float)counts.nr_texture) / 2.0,
+      .arith = ((float)counts.nr_arith) / model->rates.fma,
+      .t = ((float)counts.nr_texture) / model->rates.texel,
       .v = ((float)counts.nr_varying) / 16.0,
       .ldst = ((float)counts.nr_ldst) / 1.0,
       .code_size = size,
@@ -3969,6 +3989,7 @@ va_count_stats(bi_context *ctx, unsigned nr_ins, unsigned size,
    struct valhall_stats stats = {
       .instrs = nr_ins,
       .code_size = size,
+      .constant_data_size = ctx->constant_pool_size_B,
       .fma = ((float)counts->fma),
       .cvt = ((float)counts->cvt),
       .sfu = ((float)counts->sfu),
@@ -4012,6 +4033,9 @@ va_gather_stats_block(bi_block *block, struct va_stats *counts)
    unsigned nr_ins = 0;
 
    bi_foreach_instr_in_block(block, I) {
+      if (I->is_blend_prologue)
+         continue;
+
       nr_ins++;
       va_count_instr_stats(I, counts);
    }
@@ -4101,6 +4125,9 @@ va_gather_stats(bi_context *ctx, unsigned size, struct valhall_stats *out,
    switch (mode) {
    case GATHER_STATS_FULL:
       bi_foreach_instr_global(ctx, I) {
+         if (I->is_blend_prologue)
+            continue;
+
          nr_ins++;
          va_count_instr_stats(I, &counts);
       }
@@ -4193,73 +4220,6 @@ compare_u32(const void* a, const void* b, void* _)
    const uint32_t va = (uintptr_t)a;
    const uint32_t vb = (uintptr_t)b;
    return va - vb;
-}
-
-static const char *
-idvs_variant_suffix(enum bi_idvs_mode idvs)
-{
-   switch (idvs) {
-   case BI_IDVS_VARYING:
-      return "_var";
-   case BI_IDVS_POSITION:
-      return "_pos";
-   case BI_IDVS_ALL:
-      return "_all";
-   case BI_IDVS_NONE:
-      return "";
-   default:
-      return "invalid";
-   }
-}
-
-static void
-bi_dump_shader(bi_context *ctx, struct util_dynarray *binary,
-               enum bi_idvs_mode idvs, uint32_t offset, uint32_t size)
-{
-   const char *dump_dir = os_get_option_secure("BIFROST_MESA_DUMP_DIR");
-   if (dump_dir == NULL)
-      return;
-
-   bool has_src_blake3 = false;
-   for (uint32_t i = 0; i < BLAKE3_OUT_LEN && !has_src_blake3; ++i)
-      has_src_blake3 |= ctx->nir->info.source_blake3[i] != 0;
-
-   /* Only shaders with a unique source identifier can be dumped. */
-   if (!has_src_blake3) {
-      fprintf(
-         stderr,
-         "Warning: Skip dump of shader %s (stage=%s) without source hash\n",
-         ctx->nir->info.name ?: "<unnamed>",
-         _mesa_shader_stage_to_abbrev(ctx->stage));
-      return;
-   }
-
-   const char *id = NULL;
-   char blake3_str[BLAKE3_HEX_LEN] = {0};
-   _mesa_blake3_format(blake3_str, ctx->nir->info.source_blake3);
-   id = &blake3_str[0];
-
-   char path[PATH_MAX + 1] = {0};
-   snprintf(path, sizeof(path), "%s/%s.%s%s.bin", dump_dir, id,
-            _mesa_shader_stage_to_file_ext(ctx->stage),
-            idvs_variant_suffix(idvs));
-
-   FILE *dump_stream = fopen(path, "w");
-
-   unsigned written = 0;
-   if (dump_stream)
-      written = fwrite(binary->data, sizeof(char), size, dump_stream);
-
-   if (written == size) {
-      fprintf(stderr, "PAN: Dumped shader %s to %s\n",
-              ctx->nir->info.name ?: "<unnamed>", path);
-   } else {
-      fprintf(stderr, "PAN: Failed to dump %s to %s\n",
-              ctx->nir->info.name ?: "<unnamed>", path);
-   }
-
-   if (dump_stream)
-      fclose(dump_stream);
 }
 
 static bi_context *
@@ -4533,8 +4493,6 @@ bi_compile_variant_nir(nir_shader *nir,
       bi_pack_valhall(ctx, binary);
    }
 
-   bi_dump_shader(ctx, binary, idvs, offset, binary->size - offset);
-
    if (bifrost_debug & BIFROST_DBG_SHADERS && !skip_internal) {
       if (ctx->arch <= 8) {
          disassemble_bifrost(stderr, binary->data + offset,
@@ -4544,6 +4502,14 @@ bi_compile_variant_nir(nir_shader *nir,
          disassemble_valhall(stderr, binary->data + offset,
                              binary->size - offset,
                              bifrost_debug & BIFROST_DBG_VERBOSE);
+      }
+
+      if (ctx->constant_pool_size_B) {
+         fprintf(stderr, "constant pool (%u bytes at offset %u):\n",
+                 ctx->constant_pool_size_B, ctx->constant_pool_offset_B);
+         u_hexdump_words(stderr,
+                         (const uint8_t *)binary->data + offset + ctx->constant_pool_offset_B,
+                         ctx->constant_pool_size_B);
       }
 
       fflush(stderr);

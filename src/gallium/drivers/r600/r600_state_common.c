@@ -17,12 +17,258 @@
 #include "util/u_memory.h"
 #include "util/u_upload_mgr.h"
 #include "util/u_math.h"
+#include "util/u_prim.h"
 #include "tgsi/tgsi_parse.h"
-#include "tgsi/tgsi_scan.h"
 
 #include "nir.h"
 #include "nir_builder.h"
-#include "nir/nir_to_tgsi_info.h"
+#include "nir/tgsi_to_nir.h"
+#include "sfn/sfn_nir.h"
+
+static void r600_tgsi_to_nir(struct pipe_context *ctx,
+                             struct r600_pipe_shader_selector *sel,
+                             unsigned mesa_shader_stage)
+{
+	const nir_shader_compiler_options *nir_options =
+		ctx->screen->nir_options[mesa_shader_stage];
+
+	sel->nir = tgsi_to_nir(sel->tokens, ctx->screen, true);
+
+	/* Lower int64 ops because we have some r600 built-in shaders that use it. */
+	if (nir_options->lower_int64_options) {
+		NIR_PASS(_, sel->nir, nir_lower_alu_to_scalar,
+			 r600_lower_to_scalar_instr_filter, NULL);
+		NIR_PASS(_, sel->nir, nir_lower_int64);
+	}
+	NIR_PASS(_, sel->nir, nir_lower_flrp, ~0, false);
+}
+
+static unsigned r600_get_ps_nr_cbufs(const struct nir_shader *nir)
+{
+	unsigned nr_cbufs = 0;
+
+	if (nir->info.stage != MESA_SHADER_FRAGMENT)
+		return 0;
+
+	if (nir->info.io_lowered) {
+		uint64_t outputs_written = nir->info.outputs_written;
+
+		while (outputs_written) {
+			unsigned location = u_bit_scan64(&outputs_written);
+
+			if (location == FRAG_RESULT_COLOR)
+				nr_cbufs = MAX2(nr_cbufs, 1);
+			else if (location >= FRAG_RESULT_DATA0)
+				nr_cbufs = MAX2(nr_cbufs, location - FRAG_RESULT_DATA0 + 1);
+		}
+
+		return nr_cbufs;
+	}
+
+	nir_foreach_shader_out_variable(variable, nir) {
+		const struct glsl_type *type = variable->type;
+
+		if (nir_is_arrayed_io(variable, nir->info.stage)) {
+			assert(glsl_type_is_array(type));
+			type = glsl_get_array_element(type);
+		}
+
+		unsigned attrib_count = nir_variable_count_slots(variable, type);
+		for (unsigned i = 0; i < attrib_count; i++) {
+			unsigned location = variable->data.location + i;
+
+			if (location == FRAG_RESULT_COLOR) {
+				nr_cbufs = MAX2(nr_cbufs, 1);
+			} else if (location >= FRAG_RESULT_DATA0) {
+				unsigned semantic_index = location - FRAG_RESULT_DATA0;
+
+				if (variable->data.index > 0)
+					semantic_index++;
+
+				nr_cbufs = MAX2(nr_cbufs, semantic_index + 1);
+			}
+		}
+	}
+
+	return nr_cbufs;
+}
+
+static bool r600_nir_writes_viewport_index(const struct nir_shader *nir)
+{
+	if (nir->info.io_lowered)
+		return nir->info.outputs_written & VARYING_BIT_VIEWPORT;
+
+	nir_foreach_shader_out_variable(variable, nir) {
+		const struct glsl_type *type = variable->type;
+
+		if (nir_is_arrayed_io(variable, nir->info.stage)) {
+			assert(glsl_type_is_array(type));
+			type = glsl_get_array_element(type);
+		}
+
+		unsigned attrib_count = nir_variable_count_slots(variable, type);
+		for (unsigned i = 0; i < attrib_count; i++) {
+			if (variable->data.location + i == VARYING_SLOT_VIEWPORT)
+				return true;
+		}
+	}
+
+	return false;
+}
+
+static int r600_get_lds_varying_index(gl_varying_slot location)
+{
+	switch (location) {
+	case VARYING_SLOT_POS:
+		return 0;
+	case VARYING_SLOT_PSIZ:
+		return 1;
+	case VARYING_SLOT_CLIP_DIST0:
+	case VARYING_SLOT_CLIP_DIST1:
+		return 2 + location - VARYING_SLOT_CLIP_DIST0;
+	case VARYING_SLOT_TEX0:
+	case VARYING_SLOT_TEX1:
+	case VARYING_SLOT_TEX2:
+	case VARYING_SLOT_TEX3:
+	case VARYING_SLOT_TEX4:
+	case VARYING_SLOT_TEX5:
+	case VARYING_SLOT_TEX6:
+	case VARYING_SLOT_TEX7:
+		return 4 + location - VARYING_SLOT_TEX0;
+	case VARYING_SLOT_COL0:
+	case VARYING_SLOT_COL1:
+		return 12 + location - VARYING_SLOT_COL0;
+	case VARYING_SLOT_BFC0:
+	case VARYING_SLOT_BFC1:
+		return 14 + location - VARYING_SLOT_BFC0;
+	case VARYING_SLOT_CLIP_VERTEX:
+		return 16;
+	default:
+		if (location >= VARYING_SLOT_VAR0 && location < VARYING_SLOT_PATCH0) {
+			unsigned index = location - VARYING_SLOT_VAR0;
+
+			if (index <= 63 - 17)
+				return 17 + index;
+			else
+				/* same explanation as in the default return,
+				 * the only user hitting this is st/nine.
+				 */
+				return 0;
+		}
+
+		/* Don't fail here. The result of this function is only used
+		 * for LS, TCS, TES, and GS, where legacy GL semantics can't
+		 * occur, but this function is called for all vertex shaders
+		 * before it's known whether LS will be compiled or not.
+		 */
+		return 0;
+	}
+}
+
+static int r600_get_lds_patch_index(gl_varying_slot location)
+{
+	/* Patch indices are completely separate from per-vertex indices and
+	 * thus start from 0.
+	 */
+	if (location == VARYING_SLOT_TESS_LEVEL_OUTER)
+		return 0;
+	else if (location == VARYING_SLOT_TESS_LEVEL_INNER)
+		return 1;
+	else if (location >= VARYING_SLOT_PATCH0)
+		return 2 + location - VARYING_SLOT_PATCH0;
+
+	return 0;
+}
+
+static void r600_add_lds_output_for_location(struct r600_pipe_shader_selector *sel,
+					     gl_varying_slot location)
+{
+	if (location == VARYING_SLOT_TESS_LEVEL_INNER ||
+	    location == VARYING_SLOT_TESS_LEVEL_OUTER ||
+	    location >= VARYING_SLOT_PATCH0)
+		sel->lds_patch_outputs_written_mask |=
+			1ull << r600_get_lds_patch_index(location);
+	else
+		sel->lds_outputs_written_mask |=
+			1ull << r600_get_lds_varying_index(location);
+}
+
+static void r600_cache_lds_info_from_lowered_nir(struct r600_pipe_shader_selector *sel)
+{
+	uint64_t outputs_written = sel->nir->info.outputs_written;
+	uint32_t patch_outputs_written = sel->nir->info.patch_outputs_written;
+
+	while (outputs_written) {
+		gl_varying_slot location = u_bit_scan64(&outputs_written);
+		r600_add_lds_output_for_location(sel, location);
+	}
+
+	while (patch_outputs_written) {
+		gl_varying_slot location =
+			VARYING_SLOT_PATCH0 + u_bit_scan(&patch_outputs_written);
+		r600_add_lds_output_for_location(sel, location);
+	}
+}
+
+static void r600_cache_lds_info_from_nir_variables(struct r600_pipe_shader_selector *sel)
+{
+	nir_foreach_shader_out_variable(variable, sel->nir) {
+		const struct glsl_type *type = variable->type;
+
+		if (nir_is_arrayed_io(variable, sel->nir->info.stage)) {
+			assert(glsl_type_is_array(type));
+			type = glsl_get_array_element(type);
+		}
+
+		unsigned attrib_count = nir_variable_count_slots(variable, type);
+		for (unsigned i = 0; i < attrib_count; i++)
+			r600_add_lds_output_for_location(sel, variable->data.location + i);
+	}
+}
+
+static void r600_cache_lds_info(struct r600_pipe_shader_selector *sel)
+{
+	sel->lds_patch_outputs_written_mask = 0;
+	sel->lds_outputs_written_mask = 0;
+
+	switch (sel->type) {
+	case MESA_SHADER_VERTEX:
+	case MESA_SHADER_TESS_CTRL:
+		break;
+	default:
+		return;
+	}
+
+	if (sel->nir->info.io_lowered)
+		r600_cache_lds_info_from_lowered_nir(sel);
+	else
+		r600_cache_lds_info_from_nir_variables(sel);
+}
+
+static void r600_cache_nir_selector_info(struct r600_pipe_shader_selector *sel)
+{
+	sel->nir_info.images_declared = sel->nir->info.images_used[0];
+	sel->nir_info.writes_memory = sel->nir->info.writes_memory;
+	sel->nir_info.fs_early_depth_stencil =
+		sel->nir->info.fs.early_fragment_tests |
+		sel->nir->info.fs.post_depth_coverage;
+	sel->nir_info.vs_window_space =
+		sel->nir->info.stage == MESA_SHADER_VERTEX &&
+		sel->nir->info.vs.window_space_position;
+	sel->nir_info.writes_viewport_index =
+		r600_nir_writes_viewport_index(sel->nir);
+	sel->nir_info.image_file_max =
+		(int)BITSET_LAST_BIT(sel->nir->info.images_used) - 1;
+	sel->nir_info.ps_nr_cbufs = r600_get_ps_nr_cbufs(sel->nir);
+
+	sel->nir_info.tes_prim_mode =
+		u_tess_prim_from_shader(sel->nir->info.tess._primitive_mode);
+	sel->nir_info.tes_spacing = (sel->nir->info.tess.spacing + 1) % 3;
+	sel->nir_info.tes_vertex_order_cw = !sel->nir->info.tess.ccw;
+	sel->nir_info.tes_point_mode = sel->nir->info.tess.point_mode;
+	sel->nir_info.tcs_vertices_out = sel->nir->info.tess.tcs_vertices_out;
+	r600_cache_lds_info(sel);
+}
 
 void r600_init_command_buffer(struct r600_command_buffer *cb, unsigned num_dw)
 {
@@ -788,7 +1034,7 @@ static inline void r600_shader_selector_key(const struct pipe_context *ctx,
 		key->gs.tri_strip_adj_fix = rctx->gs_tri_strip_adj_fix;
 		break;
 	case MESA_SHADER_FRAGMENT: {
-		if (rctx->ps_shader->info.images_declared)
+		if (rctx->ps_shader->nir_info.images_declared)
 			key->ps.image_size_const_offset = util_last_bit(rctx->samplers[MESA_SHADER_FRAGMENT].views.enabled_mask);
 		key->ps.color_two_side = rctx->rasterizer && rctx->rasterizer->two_side;
 		key->ps.alpha_to_one = rctx->alpha_to_one &&
@@ -808,7 +1054,7 @@ static inline void r600_shader_selector_key(const struct pipe_context *ctx,
 		key->tes.as_es = (rctx->gs_shader != NULL);
 		break;
 	case MESA_SHADER_TESS_CTRL:
-		key->tcs.prim_mode = rctx->tes_shader->info.properties[TGSI_PROPERTY_TES_PRIM_MODE];
+		key->tcs.prim_mode = rctx->tes_shader->nir_info.tes_prim_mode;
 		break;
 	case MESA_SHADER_COMPUTE:
 		break;
@@ -837,13 +1083,13 @@ r600_shader_precompile_key(const struct pipe_context *ctx,
 		break;
 
 	case MESA_SHADER_FRAGMENT:
-		key->ps.image_size_const_offset = sel->info.file_max[TGSI_FILE_IMAGE];
+		key->ps.image_size_const_offset = sel->nir_info.image_file_max;
 
 		/* This is used for gl_FragColor output expansion to the number
 		 * of color buffers bound, but also with sb it'll drop outputs
 		 * to unused cbufs.
 		 */
-		key->ps.nr_cbufs = sel->info.file_max[TGSI_FILE_OUTPUT] + 1;
+		key->ps.nr_cbufs = sel->nir_info.ps_nr_cbufs;
 		break;
 
 	case MESA_SHADER_TESS_CTRL:
@@ -933,10 +1179,16 @@ struct r600_pipe_shader_selector *r600_create_shader_state_tokens(struct pipe_co
 	sel->type = mesa_shader_stage;
 	if (ir == PIPE_SHADER_IR_TGSI) {
 		sel->tokens = tgsi_dup_tokens((const struct tgsi_token *)prog);
-		tgsi_scan_shader(sel->tokens, &sel->info);
+		glsl_type_singleton_init_or_ref();
+		r600_tgsi_to_nir(ctx, sel, mesa_shader_stage);
+		r600_cache_nir_selector_info(sel);
+		glsl_type_singleton_decref();
+		FREE(sel->tokens);
+		sel->tokens = NULL;
+		ir = PIPE_SHADER_IR_NIR;
 	} else if (ir == PIPE_SHADER_IR_NIR){
 		sel->nir = (nir_shader *)prog;
-		nir_tgsi_scan_shader(sel->nir, &sel->info, true);
+		r600_cache_nir_selector_info(sel);
 	}
 	sel->ir_type = ir;
 	return sel;
@@ -946,7 +1198,6 @@ static void *r600_create_shader_state(struct pipe_context *ctx,
 			       const struct pipe_shader_state *state,
 			       unsigned mesa_shader_stage)
 {
-	int i;
 	struct r600_pipe_shader_selector *sel;
 	
 	if (state->type == PIPE_SHADER_IR_TGSI)
@@ -961,33 +1212,11 @@ static void *r600_create_shader_state(struct pipe_context *ctx,
 	switch (mesa_shader_stage) {
 	case MESA_SHADER_GEOMETRY:
 		sel->gs_output_prim =
-			sel->info.properties[TGSI_PROPERTY_GS_OUTPUT_PRIM];
+			sel->nir->info.gs.output_primitive;
 		sel->gs_max_out_vertices =
-			sel->info.properties[TGSI_PROPERTY_GS_MAX_OUTPUT_VERTICES];
+			sel->nir->info.gs.vertices_out;
 		sel->gs_num_invocations =
-			sel->info.properties[TGSI_PROPERTY_GS_INVOCATIONS];
-		break;
-	case MESA_SHADER_VERTEX:
-	case MESA_SHADER_TESS_CTRL:
-		sel->lds_patch_outputs_written_mask = 0;
-		sel->lds_outputs_written_mask = 0;
-
-		for (i = 0; i < sel->info.num_outputs; i++) {
-			unsigned name = sel->info.output_semantic_name[i];
-			unsigned index = sel->info.output_semantic_index[i];
-
-			switch (name) {
-			case TGSI_SEMANTIC_TESSINNER:
-			case TGSI_SEMANTIC_TESSOUTER:
-			case TGSI_SEMANTIC_PATCH:
-				sel->lds_patch_outputs_written_mask |=
-					1ull << r600_get_lds_unique_index(name, index);
-				break;
-			default:
-				sel->lds_outputs_written_mask |=
-					1ull << r600_get_lds_unique_index(name, index);
-			}
-		}
+			sel->nir->info.gs.invocations;
 		break;
 	default:
 		break;
@@ -1042,16 +1271,26 @@ static void r600_bind_ps_state(struct pipe_context *ctx, void *state)
 	rctx->ps_shader = (struct r600_pipe_shader_selector *)state;
 }
 
-static struct tgsi_shader_info *r600_get_vs_info(struct r600_context *rctx)
+static struct r600_pipe_shader_selector *r600_get_last_vertex_stage(struct r600_context *rctx)
 {
 	if (rctx->gs_shader)
-		return &rctx->gs_shader->info;
+		return rctx->gs_shader;
 	else if (rctx->tes_shader)
-		return &rctx->tes_shader->info;
+		return rctx->tes_shader;
 	else if (rctx->vs_shader)
-		return &rctx->vs_shader->info;
+		return rctx->vs_shader;
 	else
 		return NULL;
+}
+
+static void r600_update_last_vertex_stage_viewport_state(struct r600_context *rctx)
+{
+	struct r600_pipe_shader_selector *sel = r600_get_last_vertex_stage(rctx);
+
+	if (sel)
+		r600_update_vs_writes_viewport_index(&rctx->b,
+						       sel->nir_info.vs_window_space,
+						       sel->nir_info.writes_viewport_index);
 }
 
 static void r600_bind_vs_state(struct pipe_context *ctx, void *state)
@@ -1062,7 +1301,7 @@ static void r600_bind_vs_state(struct pipe_context *ctx, void *state)
 		return;
 
 	rctx->vs_shader = (struct r600_pipe_shader_selector *)state;
-	r600_update_vs_writes_viewport_index(&rctx->b, r600_get_vs_info(rctx));
+	r600_update_last_vertex_stage_viewport_state(rctx);
 
         if (rctx->vs_shader->so.num_outputs)
            rctx->b.streamout.stride_in_dw = rctx->vs_shader->so.stride;
@@ -1076,7 +1315,7 @@ static void r600_bind_gs_state(struct pipe_context *ctx, void *state)
 		return;
 
 	rctx->gs_shader = (struct r600_pipe_shader_selector *)state;
-	r600_update_vs_writes_viewport_index(&rctx->b, r600_get_vs_info(rctx));
+	r600_update_last_vertex_stage_viewport_state(rctx);
 
 	if (!state)
 		return;
@@ -1100,7 +1339,7 @@ static void r600_bind_tes_state(struct pipe_context *ctx, void *state)
 		return;
 
 	rctx->tes_shader = (struct r600_pipe_shader_selector *)state;
-	r600_update_vs_writes_viewport_index(&rctx->b, r600_get_vs_info(rctx));
+	r600_update_last_vertex_stage_viewport_state(rctx);
 
 	if (!state)
 		return;
@@ -1124,12 +1363,7 @@ void r600_delete_shader_selector(struct pipe_context *ctx,
 		p = c;
 	}
 
-	if (sel->ir_type == PIPE_SHADER_IR_TGSI) {
-		free(sel->tokens);
-		/* We might have converted the TGSI shader to a NIR shader */
-		ralloc_free(sel->nir);
-	}
-	else if (sel->ir_type == PIPE_SHADER_IR_NIR)
+	if (sel->ir_type == PIPE_SHADER_IR_NIR)
 		ralloc_free(sel->nir);
 	free(sel->nir_blob);
 	free(sel);
@@ -2622,7 +2856,7 @@ static void r600_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info 
 	const enum mesa_prim rast_prim = rctx->current_rast_prim;
 
 	rctx->current_rast_prim = rctx->gs_shader ? rctx->gs_shader->gs_output_prim
-		: rctx->tes_shader ? rctx->tes_shader->info.properties[TGSI_PROPERTY_TES_PRIM_MODE]
+		: rctx->tes_shader ? rctx->tes_shader->nir_info.tes_prim_mode
 		: info->mode;
 
 	if (rast_prim != rctx->current_rast_prim) {

@@ -223,11 +223,14 @@ anv_shader_init_uuid(struct anv_physical_device *device)
                        sizeof(device->driver_build_sha1));
    brw_device_blake3_update(&ctx, &device->info);
 
-   const bool always_bindless = !!ANV_DEBUG(BINDLESS);
+   const bool always_bindless = device->drirc.features.always_bindless;
    _mesa_blake3_update(&ctx, &always_bindless, sizeof(always_bindless));
 
    const bool indirect_descriptors = device->indirect_descriptors;
    _mesa_blake3_update(&ctx, &indirect_descriptors, sizeof(indirect_descriptors));
+
+   const bool efficient_64bit = device->uses_efficient_64bit;
+   _mesa_blake3_update(&ctx, &efficient_64bit, sizeof(efficient_64bit));
 
    const int spilling_rate = device->compiler->spilling_rate;
    _mesa_blake3_update(&ctx, &spilling_rate, sizeof(spilling_rate));
@@ -386,6 +389,7 @@ populate_base_prog_key(struct brw_base_prog_key *key,
    if (rs != NULL)
       key->robust_flags = anv_get_robust_flags(rs);
    key->divergent_atomics_flags = pdevice->drirc.perf.opt_divergent_atomics;
+   key->use_efficient_64bit = pdevice->uses_efficient_64bit;
 }
 
 static void
@@ -700,6 +704,8 @@ populate_cs_prog_key(struct brw_cs_prog_key *key,
 
    key->base.divergent_atomics_flags |=
       pdevice->drirc.perf.opt_divergent_atomics_compute_only;
+   key->base.atomic_branch_flags |=
+      pdevice->drirc.perf.opt_atomic_branch_compute_only;
 }
 
 static void
@@ -1017,12 +1023,11 @@ static nir_def *
 wa_18019110168_load_per_primitive_remap_table(nir_builder *b, void *data)
 {
    const struct anv_pipeline_bind_map *bind_map = data;
-   nir_def *val = NULL;
-
-   val = nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
-                                  .base = anv_drv_const_offset(drv_data.gfx.wa_18019110168) -
-                                          bind_map->push_ranges[0].start * 32,
-                                  .range = anv_drv_const_size(drv_data.gfx.wa_18019110168));
+   nir_def *val =
+      nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                               .base = anv_drv_const_offset(drv_data.gfx.wa_18019110168) -
+                                       bind_map->push_ranges[0].start * 32,
+                               .range = anv_drv_const_size(drv_data.gfx.wa_18019110168));
 
    return nir_iand_imm(b, val, ANV_WA_18019110168_PER_PRIMITIVE_REMAP_TABLE_OFFSET_MASK);
 }
@@ -1037,6 +1042,52 @@ populate_compile_params_mesh(union brw_any_compile_params *params,
    params->mesh.wa_18019110168_load_provoking_vertex =
       wa_18019110168_load_provoking_vertex;
    params->mesh.wa_18019110168_data = (void *)&shader_data->bind_map;
+}
+
+static nir_def *
+rt_write_efficient_64bit(nir_builder *b, signed rt, void *data)
+{
+   struct anv_shader_data *shader_data = data;
+   const struct anv_pipeline_bind_map *bind_map = &shader_data->bind_map;
+   const struct vk_color_attachment_location_state *cal = shader_data->fs_color_map;
+
+   if (rt < 0 && shader_data->bind_map.surface_count == 0)
+      return nir_imm_int64(b, 0);
+
+   nir_def *color_offset =
+      nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                               .base = anv_drv_const_offset(drv_data.gfx.fs_color_offset) -
+                                       bind_map->push_ranges[0].start * 32,
+                               .range = anv_drv_const_size(drv_data.gfx.fs_color_offset));
+
+   if (rt >= 0) {
+      if (cal != NULL) {
+         /* If the attachment is unused, keep the RT write on the first render
+          * target item which is the null surface.
+          */
+         for (uint32_t i = 0; i < ARRAY_SIZE(cal->color_map); i++) {
+            if (cal->color_map[i] == rt) {
+               color_offset = nir_iadd_imm(
+                  b, color_offset, (i + 1) * ANV_SURFACE_STATE_SIZE);
+            }
+         }
+      } else {
+         nir_def *map =
+            nir_load_push_data_intel(b, 1, 32, nir_imm_int(b, 0),
+                                     .base = anv_drv_const_offset(drv_data.gfx.fs_color_map) -
+                                             bind_map->push_ranges[0].start * 32,
+                                     .range = anv_drv_const_size(drv_data.gfx.fs_color_map));
+         nir_def *index = nir_ubitfield_extract_imm(b, map, rt * 4, 4);
+         color_offset = nir_iadd(b, color_offset, nir_imul_imm(b, index, ANV_SURFACE_STATE_SIZE));
+         shader_data->prog_data.fs.uses_fs_color_map = true;
+      }
+   }
+
+   shader_data->prog_data.fs.uses_fs_color_offset = true;
+   return nir_pack_64_2x32_split(
+      b,
+      color_offset,
+      nir_load_reloc_const_intel(b, BRW_SHADER_RELOC_DESCRIPTORS_INTERNAL_HIGH));
 }
 
 static void
@@ -1064,6 +1115,11 @@ populate_compile_params_fs(union brw_any_compile_params *params,
    params->fs.wa_18019110168_load_per_primitive_remap_table_offset =
       wa_18019110168_load_per_primitive_remap_table;
    params->fs.wa_18019110168_data = (void *)&shader_data->bind_map;
+
+   if (shader_data->key.base.use_efficient_64bit) {
+      params->fs.rt_write_cb = rt_write_efficient_64bit;
+      params->fs.rt_write_data = (void *)shader_data;
+   }
 }
 
 static bool
@@ -1083,7 +1139,7 @@ populate_compile_params_bs(union brw_any_compile_params *params,
 {
    nir_shader *nir = shader_data->info->nir;
 
-   struct brw_nir_lower_shader_calls_state lowering_state = {
+   struct brw_nir_lower_rt_state lowering_state = {
       .devinfo = devinfo,
       .key = &shader_data->key.bs,
    };
@@ -1451,7 +1507,8 @@ anv_shader_lower_nir(struct anv_device *device,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
 
-   NIR_PASS(_, nir, brw_nir_lower_ray_queries, &pdevice->info);
+   NIR_PASS(_, nir, brw_nir_lower_ray_queries,
+            &pdevice->info, &shader_data->key.base);
 
    shader_data->push_desc_info.used_descriptors =
       anv_nir_compute_used_push_descriptors(
@@ -1460,19 +1517,6 @@ anv_shader_lower_nir(struct anv_device *device,
    /* Need to have render targets placed first in the bind_map */
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       anv_shader_compute_fragment_rts(devinfo, state, shader_data);
-
-   uint32_t dynamic_descriptors_offset = 0;
-   uint32_t dynamic_descriptors_offsets[MAX_SETS] = {};
-   for (uint32_t i = 0; i < set_layout_count; i++) {
-      dynamic_descriptors_offsets[i] = dynamic_descriptors_offset;
-      if (set_layouts[i] != NULL) {
-         shader_data->bind_map.binding_mask |= ANV_PIPELINE_BIND_MASK_SET(i);
-         const uint32_t dyn_desc_count =
-            set_layouts[i]->vk.dynamic_descriptor_count;
-         shader_data->bind_map.dynamic_descriptors[i] = dyn_desc_count;
-         dynamic_descriptors_offset += dyn_desc_count;
-      }
-   }
 
    /* Apply the actual layout to UBOs, SSBOs, and textures */
    if (shader_data->info->flags & VK_SHADER_CREATE_DESCRIPTOR_HEAP_BIT_EXT) {
@@ -1484,9 +1528,6 @@ anv_shader_lower_nir(struct anv_device *device,
       NIR_PASS(_, nir, anv_nir_apply_pipeline_layout,
                pdevice, shader_data->key.base.robust_flags,
                set_layouts, set_layout_count,
-               (shader_data->info->flags &
-                VK_SHADER_CREATE_INDEPENDENT_SETS_BIT_KHR) ? NULL :
-               dynamic_descriptors_offsets,
                shader_data->info->flags & VK_SHADER_CREATE_INDIRECT_BINDABLE_BIT_EXT,
                &shader_data->bind_map, &shader_data->push_map, mem_ctx);
    }
@@ -1622,6 +1663,13 @@ anv_shader_lower_nir(struct anv_device *device,
                                            brw_fs_prog_key_is_dynamic(&shader_data->key.fs),
                   .mesh_dynamic          = nir->info.stage == MESA_SHADER_FRAGMENT &&
                                            shader_data->key.fs.mesh_input == INTEL_SOMETIMES,
+                  .use_fs_color_offset   = pdevice->uses_efficient_64bit &&
+                                           shader_data->bind_map.surface_count > 0 &&
+                                           shader_data->bind_map.surface_to_descriptor[0].set == ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS,
+                  .use_fs_color_map      = pdevice->uses_efficient_64bit &&
+                                           shader_data->bind_map.surface_count > 0 &&
+                                           shader_data->bind_map.surface_to_descriptor[0].set == ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS &&
+                                           shader_data->fs_color_map == NULL,
                },
                &shader_data->key.base,
                &shader_data->prog_data.base,
@@ -1769,29 +1817,34 @@ anv_shaders_post_lower_rt(struct anv_device *device,
                           struct anv_shader_data *shaders_data,
                           uint32_t shader_count)
 {
+
    for (uint32_t s = 0; s < shader_count; s++) {
       struct anv_shader_data *shader_data = &shaders_data[s];
+      struct brw_nir_lower_rt_state state = {
+         .devinfo = device->info,
+         .key = &shader_data->key.bs,
+      };
       nir_shader *nir = shader_data->info->nir;
 
       switch (nir->info.stage) {
       case MESA_SHADER_RAYGEN:
-         brw_nir_lower_raygen(nir, device->info);
+         brw_nir_lower_raygen(nir, &state);
          break;
 
       case MESA_SHADER_ANY_HIT:
-         brw_nir_lower_any_hit(nir, device->info);
+         brw_nir_lower_any_hit(nir, &state);
          break;
 
       case MESA_SHADER_CLOSEST_HIT:
-         brw_nir_lower_closest_hit(nir, device->info);
+         brw_nir_lower_closest_hit(nir, &state);
          break;
 
       case MESA_SHADER_MISS:
-         brw_nir_lower_miss(nir, device->info);
+         brw_nir_lower_miss(nir, &state);
          break;
 
       case MESA_SHADER_CALLABLE:
-         brw_nir_lower_callable(nir, device->info);
+         brw_nir_lower_callable(nir, &state);
          break;
 
       case MESA_SHADER_INTERSECTION:
@@ -2221,6 +2274,7 @@ anv_shader_compile(struct vk_device *vk_device,
          shader_data->key.fs.prefer_simd32 =
             shader_data->workaround != NULL &&
             shader_data->workaround->prefer_simd32_fs;
+         shader_data->fs_color_map = state != NULL ? state->cal : NULL;
          break;
       case MESA_SHADER_COMPUTE:
          populate_cs_prog_key(&shader_data->key.cs, vk_device->physical,
@@ -2280,7 +2334,10 @@ anv_shader_compile(struct vk_device *vk_device,
          ordered_infos[MESA_SHADER_INTERSECTION]->nir,
          ordered_infos[MESA_SHADER_ANY_HIT] != NULL ?
          ordered_infos[MESA_SHADER_ANY_HIT]->nir : NULL,
-         device->info);
+         &(struct brw_nir_lower_rt_state) {
+            .devinfo = device->info,
+            .key = &shaders_data[0].key.bs,
+         });
    }
 
    if (mesa_shader_stage_is_graphics(shaders_data[0].info->stage))

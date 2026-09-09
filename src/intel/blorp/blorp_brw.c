@@ -40,6 +40,12 @@ blorp_nir_options_brw(struct blorp_context *blorp,
    return &compiler->nir_options[stage];
 }
 
+static nir_def *
+blorp_nir_rt_write(nir_builder *b, signed rt, void *data)
+{
+   return nir_load_push_data_intel(b, 1, 64, nir_imm_int(b, 0), .base = 0, .range = 8);
+}
+
 static struct blorp_program
 blorp_compile_fs_brw(struct blorp_context *blorp, void *mem_ctx,
                      struct nir_shader *nir,
@@ -51,6 +57,9 @@ blorp_compile_fs_brw(struct blorp_context *blorp, void *mem_ctx,
    const struct brw_compiler *compiler = blorp->compiler->brw;
 
    struct brw_fs_prog_data *fs_prog_data = rzalloc(mem_ctx, struct brw_fs_prog_data);
+
+   if (blorp->config.use_efficient_64bit)
+      fs_prog_data->base.push_sizes[0] = 32;
 
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
@@ -70,6 +79,7 @@ blorp_compile_fs_brw(struct blorp_context *blorp, void *mem_ctx,
 
    struct brw_fs_prog_key wm_key;
    memset(&wm_key, 0, sizeof(wm_key));
+   wm_key.base.use_efficient_64bit = blorp->config.use_efficient_64bit;
    wm_key.multisample_fbo = multisample_fbo ? INTEL_ALWAYS : INTEL_NEVER;
    wm_key.nr_color_regions = 1;
 
@@ -86,6 +96,8 @@ blorp_compile_fs_brw(struct blorp_context *blorp, void *mem_ctx,
          .debug_flag = DEBUG_BLORP,
          .archiver = archiver,
       },
+
+      .rt_write_cb = blorp->config.use_efficient_64bit ? blorp_nir_rt_write : NULL,
 
       .use_rep_send = use_repclear,
       .max_polygons = 1,
@@ -123,7 +135,11 @@ blorp_compile_vs_brw(struct blorp_context *blorp, void *mem_ctx,
                        nir->info.separate_shader,
                        1);
 
-   struct brw_vs_prog_key vs_key = { 0, };
+   struct brw_vs_prog_key vs_key = {
+      .base = {
+         .use_efficient_64bit = blorp->config.use_efficient_64bit,
+      },
+   };
 
    debug_archiver *archiver =
       blorp_debug_archiver_open(mem_ctx, nir, key, key_size);
@@ -238,6 +254,8 @@ blorp_compile_cs_brw(struct blorp_context *blorp, void *mem_ctx,
    struct brw_cs_prog_key cs_key;
    memset(&cs_key, 0, sizeof(cs_key));
 
+   cs_key.base.use_efficient_64bit = blorp->config.use_efficient_64bit;
+
    debug_archiver *archiver =
       blorp_debug_archiver_open(mem_ctx, nir, key, key_size);
 
@@ -285,7 +303,8 @@ blorp_params_get_layer_offset_vs_brw(struct blorp_batch *batch,
 {
    struct blorp_context *blorp = batch->blorp;
    struct layer_offset_vs_key blorp_key;
-   BLORP_KEY_INIT(blorp_key, BLORP_SHADER_TYPE_LAYER_OFFSET_VS,
+   BLORP_KEY_INIT(blorp_key, blorp,
+                  BLORP_SHADER_TYPE_LAYER_OFFSET_VS,
                   BLORP_SHADER_PIPELINE_RENDER);
 
    struct brw_fs_prog_data *fs_prog_data = params->fs_prog_data;

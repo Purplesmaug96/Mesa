@@ -27,15 +27,21 @@ extern "C" {
  * With both:        LS | HS  | ES  | GS | VS | PS
  */
 
+enum r600_interp_location {
+	R600_INTERP_LOC_SAMPLE = 0,
+	R600_INTERP_LOC_CENTER = 1,
+	R600_INTERP_LOC_CENTROID = 2,
+};
+
 struct r600_shader_io {
 	gl_varying_slot		varying_slot;
 	gl_system_value		system_value; /* Input only */
 	gl_frag_result		frag_result;
 	unsigned		gpr;
 	int			spi_sid;
-	unsigned		interpolate;
+	enum glsl_interp_mode	interpolate;
 	unsigned		ij_index;
-	unsigned		interpolate_location; //  TGSI_INTERPOLATE_LOC_CENTER, CENTROID, SAMPLE
+	enum r600_interp_location	interpolate_location;
 	unsigned		lds_pos; /* for evergreen */
 	unsigned		write_mask;
 	int			export_param; /* Output only */
@@ -95,7 +101,6 @@ struct r600_shader {
 	   Stages with only one ring items 123 will be set to 0. */
 	unsigned		ring_item_sizes[4];
 
-	unsigned		indirect_files;
 	unsigned		max_arrays;
 	unsigned		num_arrays;
 	unsigned		vs_as_es;

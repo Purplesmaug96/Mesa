@@ -162,6 +162,7 @@ enum radv_cmd_flush_bits {
    RADV_CMD_FLAG_START_PIPELINE_STATS = 1 << 14,
    RADV_CMD_FLAG_STOP_PIPELINE_STATS = 1 << 15,
    RADV_CMD_FLAG_VGT_STREAMOUT_SYNC = 1 << 16,
+   RADV_CMD_FLAG_PFP_SYNC_ME = 1 << 17,
 
    RADV_CMD_FLUSH_AND_INV_FRAMEBUFFER = (RADV_CMD_FLAG_FLUSH_AND_INV_CB | RADV_CMD_FLAG_FLUSH_AND_INV_CB_META |
                                          RADV_CMD_FLAG_FLUSH_AND_INV_DB | RADV_CMD_FLAG_FLUSH_AND_INV_DB_META),
@@ -289,8 +290,7 @@ enum rgp_flush_bits {
 enum radv_depth_clamp_mode {
    RADV_DEPTH_CLAMP_MODE_VIEWPORT = 0,     /* Clamp to the viewport min/max depth bounds */
    RADV_DEPTH_CLAMP_MODE_USER_DEFINED = 1, /* Range set using VK_EXT_depth_clamp_control */
-   RADV_DEPTH_CLAMP_MODE_ZERO_TO_ONE = 2,  /* Clamp between 0.0f and 1.0f */
-   RADV_DEPTH_CLAMP_MODE_DISABLED = 3,     /* Disable depth clamping */
+   RADV_DEPTH_CLAMP_MODE_DISABLED = 2,     /* Disable depth clamping */
 };
 
 struct radv_meta_saved_descriptor_state {
@@ -585,6 +585,7 @@ struct radv_cmd_buffer {
        *          The follower writes the value, and the leader waits.
        */
       struct {
+         struct radeon_winsys_bo *bo;     /* Buffer object of the semaphore (if separate) */
          uint64_t va;                     /* Virtual address of the semaphore. */
          uint32_t leader_value;           /* Current value of the leader. */
          uint32_t emitted_leader_value;   /* Last value emitted by the leader. */
@@ -738,6 +739,9 @@ enum radv_cmd_flush_bits radv_dst_access_flush(struct radv_cmd_buffer *cmd_buffe
                                                VkAccessFlags2 dst_flags, VkAccessFlags3KHR dst3_flags,
                                                const struct radv_image *image, const VkImageSubresourceRange *range);
 
+void radv_precompute_hw_sample_location_state(const struct radv_physical_device *pdev,
+                                              struct radv_sample_locations_state *state);
+
 struct radv_resolve_barrier {
    VkPipelineStageFlags2 src_stage_mask;
    VkPipelineStageFlags2 dst_stage_mask;
@@ -829,6 +833,8 @@ uint32_t radv_init_fmask(struct radv_cmd_buffer *cmd_buffer, struct radv_image *
 uint32_t radv_init_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
                        const VkImageSubresourceRange *range, uint32_t value);
 
+uint32_t radv_init_display_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, uint32_t value);
+
 void radv_emit_cache_flush(struct radv_cmd_buffer *cmd_buffer);
 
 void radv_emit_set_predication_state(struct radv_cmd_buffer *cmd_buffer, bool draw_visible, unsigned pred_op,
@@ -846,7 +852,6 @@ struct radv_vbo_info {
    uint32_t size;
 
    uint32_t attrib_offset;
-   uint32_t attrib_index_offset;
    uint32_t attrib_format_size;
 
    uint32_t non_trivial_format;
@@ -881,6 +886,12 @@ radv_resume_conditional_rendering(struct radv_cmd_buffer *cmd_buffer)
 
    cond_render->enabled = cond_render->enabled_save;
    cond_render->suspended = false;
+}
+
+static inline bool
+radv_cmd_buffer_is_transfer_gang(const struct radv_cmd_buffer *cmd_buffer)
+{
+   return cmd_buffer->qf == RADV_QUEUE_TRANSFER && cmd_buffer->gang.cs && cmd_buffer->gang.cs->hw_ip == AMD_IP_COMPUTE;
 }
 
 #endif /* RADV_CMD_BUFFER_H */

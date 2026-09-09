@@ -1819,6 +1819,7 @@ bool pco_nir_link_multiview(nir_shader *producer,
 bool pco_nir_lower_algebraic(nir_shader *shader);
 bool pco_nir_lower_algebraic_late(nir_shader *shader);
 bool pco_nir_lower_alpha_to_coverage(nir_shader *shader);
+bool pco_nir_lower_alu(nir_shader *shader);
 bool pco_nir_lower_atomics(nir_shader *shader, pco_data *data);
 bool pco_nir_lower_barriers(nir_shader *shader, pco_data *data);
 void pco_nir_lower_clip_cull_vars(nir_shader *shader);
@@ -3230,6 +3231,9 @@ static inline bool pco_should_skip_pass(const char *pass)
 /** Integer/float zero/false. */
 #define pco_zero pco_ref_hwreg(0, PCO_REG_CLASS_CONST)
 #define pco_false pco_zero
+
+/** Float negative zero. */
+#define pco_nzero pco_ref_hwreg(141, PCO_REG_CLASS_CONST)
 
 /** Integer one. */
 #define pco_one pco_ref_hwreg(1, PCO_REG_CLASS_CONST)

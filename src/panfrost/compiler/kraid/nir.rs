@@ -67,7 +67,9 @@ impl<'a> PhiAllocMap<'a> {
 }
 
 fn mem_access_from_nir(intrin: &nir_intrinsic_instr) -> MemAccess {
-    if (intrin.access() & ACCESS_INCLUDE_HELPERS) != 0 {
+    if (intrin.access() & ACCESS_CAN_REORDER) != 0 {
+        MemAccess::Const
+    } else if (intrin.access() & ACCESS_INCLUDE_HELPERS) != 0 {
         MemAccess::Force
     } else if (intrin.access() & ACCESS_ISTREAM_PAN) != 0 {
         MemAccess::IStream
@@ -82,11 +84,13 @@ struct ShaderFromNir<'a> {
     model: &'a dyn Model,
     nir: &'a nir_shader,
     ssa_map: FxHashMap<u32, Vec<SSAValue>>,
-    preload_map: FxHashMap<PreloadReg, SSAValue>,
+    preload_map: FxHashMap<RegRef, (PreloadRegSet, SSARef)>,
     rtz_fp16: bool,
     rtz_fp32: bool,
     ftz_fp32: bool,
     info: ShaderInfo,
+    constant_pool_label: Option<Label>,
+    constant_pool_used: bool,
 }
 
 impl<'a> ShaderFromNir<'a> {
@@ -108,6 +112,8 @@ impl<'a> ShaderFromNir<'a> {
                 tls_size: nir.scratch_size,
                 ..ShaderInfo::default()
             },
+            constant_pool_label: None,
+            constant_pool_used: false,
         }
     }
 
@@ -202,15 +208,19 @@ impl<'a> ShaderFromNir<'a> {
         }
     }
 
-    fn preload(
-        &mut self,
-        b: &mut impl SSABuilder,
-        reg: PreloadReg,
-    ) -> SSAValue {
-        *self
+    fn preload(&mut self, b: &mut impl SSABuilder, reg: PreloadReg) -> SSARef {
+        let reg_ref = self.model.preload_reg(reg).expect("Unsupported preload");
+        // Must be register-aligned
+        assert!(reg_ref.bytes() % 4 == 0);
+
+        let bits = u16::from(reg_ref.bytes()) * 8;
+        let (pre, ssa) = self
             .preload_map
-            .entry(reg)
-            .or_insert_with(|| b.alloc_ssa(32))
+            .entry(reg_ref)
+            .or_insert_with(|| (Default::default(), b.alloc_ref(bits)));
+
+        pre.insert(reg);
+        ssa.clone()
     }
 
     fn special_fau(&self, special: SpecialFAU) -> FAURef {
@@ -1188,27 +1198,29 @@ impl<'a> ShaderFromNir<'a> {
                     }
                 };
 
-                let logic_op = if src_is_zero(2) {
-                    LogicOp::None
-                } else {
-                    match alu.op {
-                        nir_op_arshift_and_pan
-                        | nir_op_lshift_and_pan
-                        | nir_op_rshift_and_pan
-                        | nir_op_lrot_and_pan
-                        | nir_op_rrot_and_pan => LogicOp::And,
-                        nir_op_arshift_or_pan
-                        | nir_op_lshift_or_pan
-                        | nir_op_rshift_or_pan
-                        | nir_op_lrot_or_pan
-                        | nir_op_rrot_or_pan => LogicOp::Or,
-                        nir_op_arshift_xor_pan
-                        | nir_op_lshift_xor_pan
-                        | nir_op_rshift_xor_pan
-                        | nir_op_lrot_xor_pan
-                        | nir_op_rrot_xor_pan => LogicOp::Xor,
-                        _ => unreachable!(),
-                    }
+                let logic_op = match alu.op {
+                    nir_op_arshift_and_pan
+                    | nir_op_lshift_and_pan
+                    | nir_op_rshift_and_pan
+                    | nir_op_lrot_and_pan
+                    | nir_op_rrot_and_pan => LogicOp::And,
+                    nir_op_arshift_or_pan
+                    | nir_op_lshift_or_pan
+                    | nir_op_rshift_or_pan
+                    | nir_op_lrot_or_pan
+                    | nir_op_rrot_or_pan => LogicOp::Or,
+                    nir_op_arshift_xor_pan
+                    | nir_op_lshift_xor_pan
+                    | nir_op_rshift_xor_pan
+                    | nir_op_lrot_xor_pan
+                    | nir_op_rrot_xor_pan => LogicOp::Xor,
+                    _ => unreachable!(),
+                };
+
+                // Zero is the identity for OR/XOR
+                let logic_op = match (logic_op, src_is_zero(2)) {
+                    (LogicOp::Or | LogicOp::Xor, true) => LogicOp::None,
+                    (x, _) => x,
                 };
 
                 b.push_op(OpShiftLop {
@@ -1476,21 +1488,19 @@ impl<'a> ShaderFromNir<'a> {
                     src: self.get_src(&srcs[0]),
                 });
             }
-            nir_intrinsic_barrier => {
-                match intrin.execution_scope() {
-                    SCOPE_NONE | SCOPE_SUBGROUP => {
-                        // TODO: Scheduling barrier
-                    }
-                    SCOPE_WORKGROUP => {
-                        assert!(matches!(
-                            self.nir.info.stage(),
-                            MESA_SHADER_COMPUTE | MESA_SHADER_KERNEL
-                        ));
-                        b.push_op(OpBarrier {});
-                    }
-                    _ => panic!("Unsupported barrier scope"),
+            nir_intrinsic_barrier => match intrin.execution_scope() {
+                SCOPE_NONE | SCOPE_SUBGROUP => {
+                    b.push_op(OpScheduleBarrier {});
                 }
-            }
+                SCOPE_WORKGROUP => {
+                    assert!(matches!(
+                        self.nir.info.stage(),
+                        MESA_SHADER_COMPUTE | MESA_SHADER_KERNEL
+                    ));
+                    b.push_op(OpBarrier {});
+                }
+                _ => panic!("Unsupported barrier scope"),
+            },
             nir_intrinsic_cmat_muladd_pan => {
                 let src_a = self.get_src(&srcs[0]);
                 let src_b = self.get_src(&srcs[1]);
@@ -1688,12 +1698,18 @@ impl<'a> ShaderFromNir<'a> {
             nir_intrinsic_load_global | nir_intrinsic_load_global_constant => {
                 let bits = intrin.def.bit_size * intrin.def.num_components;
                 let (addr, offset) = self.get_src_add_imm(&srcs[0], 16, true);
+                let is_const =
+                    intrin.intrinsic == nir_intrinsic_load_global_constant;
                 let dst = self.alloc_ssa(b, &intrin.def).into();
                 b.push_op(OpLoad {
                     dst,
                     dst_type: DataType::i(bits),
                     is_tls: (intrin.access() & ACCESS_INCLUDE_HELPERS) != 0,
-                    access: mem_access_from_nir(intrin),
+                    access: if is_const {
+                        MemAccess::Const
+                    } else {
+                        mem_access_from_nir(intrin)
+                    },
                     addr,
                     offset: offset.try_into().unwrap(),
                 });
@@ -1727,6 +1743,21 @@ impl<'a> ShaderFromNir<'a> {
                     offset: offset.try_into().unwrap(),
                 });
             }
+            nir_intrinsic_load_constant_base_ptr => {
+                assert_eq!(intrin.def.bit_size, 64);
+                assert_eq!(intrin.def.num_components, 1);
+                let label = self
+                    .constant_pool_label
+                    .expect("Shader has no constant data");
+                self.constant_pool_used = true;
+                let pc = self.special_fau(SpecialFAU::Pc);
+                let ssa = self.alloc_ssa(b, &intrin.def);
+                b.push_op(OpAdr {
+                    dst: ssa[0].into(),
+                    label,
+                });
+                b.copy_i32_to(ssa[1].into(), pc.word(1).into());
+            }
             nir_intrinsic_load_scratch_base_ptr => {
                 assert_eq!(intrin.def.bit_size, 64);
                 assert_eq!(intrin.def.num_components, 1);
@@ -1745,11 +1776,16 @@ impl<'a> ShaderFromNir<'a> {
                 let bits = intrin.def.bit_size * intrin.def.num_components;
                 let handle = self.get_src(&srcs[0]);
                 let offset = self.get_src(&srcs[1]);
+                let is_const = intrin.intrinsic == nir_intrinsic_load_ubo;
                 let dst = self.alloc_ssa(b, &intrin.def).into();
                 b.push_op(OpLdPka {
                     dst,
                     dst_type: DataType::i(bits),
-                    access: mem_access_from_nir(intrin),
+                    access: if is_const {
+                        MemAccess::Const
+                    } else {
+                        mem_access_from_nir(intrin)
+                    },
                     offset,
                     handle,
                 });
@@ -1889,9 +1925,9 @@ impl<'a> ShaderFromNir<'a> {
                     self.preload(b, PreloadReg::LocalId2),
                 ];
                 let local_id = [
-                    Src::from(preload[0]).swizzle(Swizzle::widen_u16(0)),
-                    Src::from(preload[0]).swizzle(Swizzle::widen_u16(1)),
-                    Src::from(preload[1]).swizzle(Swizzle::widen_u16(0)),
+                    Src::from(preload[0][0]).swizzle(Swizzle::widen_u16(0)),
+                    Src::from(preload[0][0]).swizzle(Swizzle::widen_u16(1)),
+                    Src::from(preload[1][0]).swizzle(Swizzle::widen_u16(0)),
                 ];
                 let ssa = local_id.into_iter().map(|src| {
                     let def = b.alloc_ssa(32);
@@ -1906,17 +1942,17 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_intrinsic_load_workgroup_id => {
                 let ssa = vec![
-                    self.preload(b, PreloadReg::WorkgroupId0),
-                    self.preload(b, PreloadReg::WorkgroupId1),
-                    self.preload(b, PreloadReg::WorkgroupId2),
+                    self.preload(b, PreloadReg::WorkgroupId0)[0],
+                    self.preload(b, PreloadReg::WorkgroupId1)[0],
+                    self.preload(b, PreloadReg::WorkgroupId2)[0],
                 ];
                 self.set_ssa(&intrin.def, ssa);
             }
             nir_intrinsic_load_global_invocation_id => {
                 let ssa = vec![
-                    self.preload(b, PreloadReg::GlobalId0),
-                    self.preload(b, PreloadReg::GlobalId1),
-                    self.preload(b, PreloadReg::GlobalId2),
+                    self.preload(b, PreloadReg::GlobalId0)[0],
+                    self.preload(b, PreloadReg::GlobalId1)[0],
+                    self.preload(b, PreloadReg::GlobalId2)[0],
                 ];
                 self.set_ssa(&intrin.def, ssa);
             }
@@ -1955,7 +1991,7 @@ impl<'a> ShaderFromNir<'a> {
             | nir_intrinsic_load_instance_id
             | nir_intrinsic_load_draw_id
             | nir_intrinsic_load_idvs_output_buf_index_pan
-            | nir_intrinsic_load_raster_sample_centroid_pan => {
+            | nir_intrinsic_load_sample_centroid_pan => {
                 assert_eq!(intrin.def.bit_size, 32);
                 assert_eq!(intrin.def.num_components, 1);
 
@@ -1967,24 +2003,23 @@ impl<'a> ShaderFromNir<'a> {
                     nir_intrinsic_load_idvs_output_buf_index_pan => {
                         PreloadReg::InternalId
                     }
-                    nir_intrinsic_load_raster_sample_centroid_pan => {
-                        PreloadReg::RasterizerSampleCentroid
+                    nir_intrinsic_load_sample_centroid_pan => {
+                        PreloadReg::SampleCentroidId
                     }
                     _ => unreachable!(),
                 };
                 let ssa = self.preload(b, reg);
-                self.set_ssa(&intrin.def, vec![ssa]);
+                self.set_ssa(&intrin.def, ssa.to_vec());
             }
             nir_intrinsic_load_frame_arg_pan => {
-                let low = self.preload(b, PreloadReg::FrameArgLow);
-                let high = self.preload(b, PreloadReg::FrameArgHigh);
-                self.set_ssa(&intrin.def, vec![low, high]);
+                let ssa = self.preload(b, PreloadReg::FrameArg);
+                self.set_ssa(&intrin.def, ssa.to_vec());
             }
             nir_intrinsic_load_view_index => {
                 assert!(b.arch() >= 14);
                 assert!(self.nir.info.stage() == MESA_SHADER_VERTEX);
                 let ssa = self.preload(b, PreloadReg::ViewId);
-                self.set_ssa(&intrin.def, vec![ssa]);
+                self.set_ssa(&intrin.def, ssa.to_vec());
             }
             nir_intrinsic_load_shader_output_pan => {
                 assert_eq!(intrin.def.bit_size, 32);
@@ -2185,17 +2220,35 @@ impl<'a> ShaderFromNir<'a> {
     fn create_preload_instrs(&mut self) -> Vec<Instr> {
         let mut preloaded: Vec<_> = self.preload_map.drain().collect();
         // All keys are different, we can use an unstable sort
-        preloaded.sort_unstable_by_key(|(reg, _ssa)| *reg);
+        preloaded.sort_unstable_by_key(|(reg, _ssa)| reg.idx);
+
+        // preload regs should never intersect
+        debug_assert!(
+            preloaded
+                .windows(2)
+                .all(|w| w[0].0.intersect(w[1].0).is_none()),
+            "overlapping preloaded registers"
+        );
 
         preloaded
             .into_iter()
-            .map(|(preload, ssa)| {
-                let reg = self.model.preload_reg(preload).unwrap();
-                self.info.register_preload |= 1 << reg.idx;
-                Instr::from(OpRegIn {
-                    dst: ssa.into(),
-                    dst_type: DataType::I32,
-                    reg,
+            .flat_map(|(reg, (preloads, ssa))| {
+                self.info.add_preload(&reg);
+
+                // Split preloads into multiple registers, we don't have any vec
+                // shrink pass and they might pollute liveness
+                assert!(reg.bytes() % 4 == 0);
+                let regs = reg.bytes() / 4;
+                (0..regs).map(move |i| {
+                    Instr::from(OpRegIn {
+                        dst: ssa[i as usize].into(),
+                        dst_type: DataType::I32,
+                        reg: reg.word(i),
+                        preload: Some(PreloadInfo {
+                            set: preloads,
+                            comp: i,
+                        }),
+                    })
                 })
             })
             .collect()
@@ -2210,6 +2263,9 @@ impl<'a> ShaderFromNir<'a> {
 
         // Pre-populate the block table so we have the same numbering as NIR
         let mut label_alloc: LabelAllocator = Default::default();
+        if self.nir.constant_data_size > 0 {
+            self.constant_pool_label = Some(label_alloc.alloc());
+        }
         let mut block_map: BlockLabelMap = Default::default();
         for nb in nfi.iter_blocks() {
             block_map.add(nb, label_alloc.alloc());
@@ -2233,12 +2289,28 @@ impl<'a> ShaderFromNir<'a> {
             blocks[0].instrs.splice(..0, self.create_preload_instrs());
         }
 
+        let constant_pool = self.constant_pool_used.then(|| ConstantPool {
+            label: self.constant_pool_label.unwrap(),
+            // SAFETY: constant_pool_used implies constant_pool_label was
+            // allocated, so constant_data_size > 0 and NIR guarantees that
+            // constant_data then points to that many bytes, owned by the
+            // nir_shader we borrow.
+            data: unsafe {
+                std::slice::from_raw_parts(
+                    self.nir.constant_data as *const u8,
+                    self.nir.constant_data_size as usize,
+                )
+            }
+            .to_vec(),
+        });
+
         Shader {
             model: self.model,
             ssa_alloc,
             phi_alloc,
             blocks,
             info: self.info,
+            constant_pool,
         }
     }
 }

@@ -219,17 +219,6 @@ etna_reset_gpu_state(struct etna_context *ctx)
    struct etna_screen *screen = ctx->screen;
    uint32_t dummy_attribs[VIVS_NFE_GENERIC_ATTRIB__LEN] = { 0 };
 
-   if (ctx->compute_only) {
-      /* compute only context does not make use of any of the dirty state tracking. */
-      assert(ctx->dirty == 0);
-      assert(ctx->dirty_sampler_views == 0);
-      assert(ctx->prev_active_samplers == 0);
-
-      etna_cmd_stream_mark_end_of_context_init(stream);
-
-      return;
-   }
-
    etna_set_state(stream, VIVS_GL_API_MODE, VIVS_GL_API_MODE_OPENGL);
    etna_set_state(stream, VIVS_PA_W_CLIP_LIMIT, 0x34000001);
    etna_set_state(stream, VIVS_PA_FLAGS, 0x00000000); /* blob sets ZCONVERT_BYPASS on GC3000+, this messes up z for us */
@@ -263,10 +252,6 @@ etna_reset_gpu_state(struct etna_context *ctx)
 
       etna_set_state(stream, VIVS_SH_CONFIG, VIVS_SH_CONFIG_RTNE_ROUNDING);
    }
-
-   if (VIV_FEATURE(screen, ETNA_FEATURE_MSAA_FRAGMENT_OPERATION))
-      etna_set_state(stream, VIVS_PS_MSAA_CONFIG, 0x6fffffff & 0xf70fffff & 0xfff6ffff &
-                                                  0xfffff6ff & 0xffffff7f);
 
    if (VIV_FEATURE(screen, ETNA_FEATURE_BUG_FIXES18))
       etna_set_state(stream, VIVS_GL_BUG_FIXES, 0x6);
@@ -308,7 +293,9 @@ etna_reset_gpu_state(struct etna_context *ctx)
    ctx->index_buffer.FE_INDEX_STREAM_BASE_ADDR.bo = NULL;
    ctx->dirty = ~0L;
    ctx->dirty_sampler_views = ~0L;
+   ctx->dirty_samplers = ~0L;
    ctx->prev_active_samplers = ~0L;
+   ctx->prev_vs_sampler_base = ~0;
    ctx->needs_gpu_state_reset = false;
    ctx->alpha_coverage_dither_emitted = false;
 }
@@ -383,7 +370,7 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
             if (pfb->cbufs[i].texture) {
                struct etna_resource *rsc = etna_resource(pfb->cbufs[i].texture);
                if (rsc->shared && rsc->layout == ETNA_LAYOUT_LINEAR &&
-                   translate_pe_format_rb_swap(pfb->cbufs[i].format)) {
+                   translate_pe_format_rb_swap(pfb->cbufs[i].format, screen)) {
                   key->frag_rb_swap |= (1 << i);
                }
             }
@@ -765,6 +752,7 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->screen = screen;
    /* need some sane default in case gallium frontends don't set some state: */
    ctx->sample_mask = 0xffff;
+   ctx->sample_coverage = 1.0f;
 
    ctx->compute_only = compute_only;
    ctx->needs_gpu_state_reset = true;

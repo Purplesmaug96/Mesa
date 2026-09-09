@@ -781,6 +781,11 @@ typedef struct nir_variable {
       unsigned depth_layout : 3;
 
       /**
+       * Whether the variable is a YUV color-output.
+       */
+      unsigned yuv : 1;
+
+      /**
        * Vertex stream output identifier.
        *
        * For packed outputs, NIR_STREAM_PACKED is set and bits [2*i+1,2*i]
@@ -2277,6 +2282,14 @@ typedef struct nir_io_xfb {
    } out[4];
 } nir_io_xfb;
 
+typedef struct nir_ps_input_info_amd {
+   unsigned slot : 5;         /* The index into SPI_PS_INPUT_CNTL_[0-31]. */
+   unsigned component : 2;
+   unsigned high_16bits : 1;  /* Only for load_interpolated_input_amd. */
+   unsigned vertex_index : 2; /* Only for load_input_vertex_amd (selects P0, P1, P2). */
+   unsigned padding : 22;
+} nir_ps_input_info_amd;
+
 unsigned
 nir_instr_xfb_write_mask(nir_intrinsic_instr *instr);
 
@@ -2816,6 +2829,11 @@ typedef struct nir_tex_instr {
     */
    bool sampler_non_uniform;
 
+   /** Similar to texture_non_uniform but for the second texture. */
+   bool texture_2_non_uniform;
+   /** Similar to texture_non_uniform but for the second sampler. */
+   bool sampler_2_non_uniform;
+
    /** True if this texture instruction uses an embedded sampler.
     *
     * In this case, sampler_index is the index in embedded sampler table.
@@ -3128,7 +3146,12 @@ nir_def_instr_nonconst(nir_def *def)
                  "nir_load_const_instr: nir_def always has to be at the same offset relative to nir_instr.");
    static_assert(offsetof(nir_phi_instr, def) == offsetof(nir_undef_instr, def),
                  "nir_phi_instr: nir_def always has to be at the same offset relative to nir_instr.");
-   return &container_of(def, nir_undef_instr, def)->instr;
+
+   /* Manually calculate the pointer address to avoid accessing through
+    * an instr type that's not actually correct.
+    */
+   char *ptr = (char *)def - offsetof(nir_undef_instr, def);
+   return (nir_instr *)ptr;
 }
 
 static inline const nir_instr *
@@ -3361,6 +3384,8 @@ nir_scalar_intrinsic_op(nir_scalar s)
    return nir_def_as_intrinsic(s.def)->intrinsic;
 }
 
+nir_scalar nir_scalar_chase_movs(nir_scalar s);
+
 static inline nir_scalar
 nir_scalar_chase_alu_src(nir_scalar s, unsigned alu_src_idx)
 {
@@ -3389,10 +3414,8 @@ nir_scalar_chase_alu_src(nir_scalar s, unsigned alu_src_idx)
    }
    assert(out.comp < out.def->num_components);
 
-   return out;
+   return nir_scalar_chase_movs(out);
 }
-
-nir_scalar nir_scalar_chase_movs(nir_scalar s);
 
 static inline nir_scalar
 nir_get_scalar(nir_def *def, unsigned channel)
@@ -5573,6 +5596,7 @@ bool nir_split_var_copies(nir_shader *shader);
 bool nir_separate_merged_clip_cull_io(nir_shader *nir);
 bool nir_split_per_member_structs(nir_shader *shader);
 bool nir_split_struct_vars(nir_shader *shader, nir_variable_mode modes);
+bool nir_opt_scalar_array_vars_to_vec(nir_shader *shader, nir_variable_mode modes);
 
 bool nir_lower_returns_impl(nir_function_impl *impl);
 bool nir_lower_returns(nir_shader *shader);
@@ -5812,8 +5836,14 @@ typedef struct {
 } nir_lower_xfb_to_stores_options;
 
 bool nir_lower_xfb_to_stores(nir_shader *nir, const nir_lower_xfb_to_stores_options *options);
+
+typedef enum {
+   nir_io_indirect_loads_lower_vertex_index = BITFIELD_BIT(0),
+   nir_io_indirect_loads_lower_divergent_offset_only = BITFIELD_BIT(1),
+} nir_lower_io_indirect_loads_options;
+
 bool nir_lower_io_indirect_loads(nir_shader *nir, nir_variable_mode modes,
-                                 bool lower_indirect_vertex_index);
+                                 nir_lower_io_indirect_loads_options options);
 bool nir_remove_outputs(nir_shader *shader, mesa_shader_stage next_stage,
                         uint64_t remove_varying, uint64_t remove_sysval);
 
@@ -6365,6 +6395,7 @@ typedef struct nir_lower_tex_options {
    unsigned bt709_external;
    unsigned bt2020_external;
    unsigned yuv_full_range_external;
+   unsigned bypass_csc_external;
 
    /**
     * To emulate certain texture wrap modes, this can be used
@@ -6988,8 +7019,7 @@ bool nir_opt_find_array_copies(nir_shader *shader);
 bool nir_def_is_frag_coord_z(nir_def *def);
 bool nir_opt_fragdepth(nir_shader *shader);
 
-bool nir_opt_gcm(nir_shader *shader, bool value_number,
-                 bool hoist_tex_from_loops);
+bool nir_opt_gcm(nir_shader *shader, bool value_number);
 
 bool nir_opt_generate_bfi(nir_shader *shader);
 
@@ -7260,6 +7290,12 @@ nir_unsigned_upper_bound(nir_shader *shader, struct hash_table *range_ht,
 bool
 nir_addition_might_overflow(nir_shader *shader, struct hash_table *range_ht,
                             nir_scalar ssa, unsigned const_val);
+
+bool
+nir_is_op_nuw(nir_shader *shader, struct hash_table *range_ht, nir_op op, nir_scalar src0, nir_scalar src1);
+
+bool
+nir_is_scalar_nuw(nir_shader *shader, struct hash_table *range_ht, nir_scalar scalar);
 
 typedef struct nir_opt_preamble_options {
    /* True if gl_DrawID is considered uniform, i.e. if the preamble is run

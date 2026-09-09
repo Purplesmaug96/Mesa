@@ -280,25 +280,13 @@ fill_state_base_addr(struct anv_cmd_buffer *cmd_buffer,
 void
 genX(cmd_buffer_emit_state_base_address)(struct anv_cmd_buffer *cmd_buffer)
 {
+   assert(!cmd_buffer->device->physical->uses_efficient_64bit);
+
    if (anv_cmd_buffer_is_blitter_queue(cmd_buffer) ||
        anv_cmd_buffer_is_video_queue(cmd_buffer))
       return;
 
    struct anv_device *device = cmd_buffer->device;
-
-   /* If no API entry point selected the current mode (this can happen if the
-    * first operation in the command buffer is a transfer operation, select
-    * BUFFER if EXT_descriptor_buffer is enabled, otherwise LEGACY.
-    */
-   if (cmd_buffer->state.pending_binding_mode ==
-       ANV_SHADER_BINDING_MODE_UNKNOWN) {
-      cmd_buffer->state.pending_binding_mode =
-         cmd_buffer->device->vk.enabled_extensions.EXT_descriptor_heap ?
-         ANV_SHADER_BINDING_MODE_HEAP :
-         cmd_buffer->device->vk.enabled_extensions.EXT_descriptor_buffer ?
-         ANV_SHADER_BINDING_MODE_BUFFER :
-         ANV_SHADER_BINDING_MODE_LEGACY;
-   }
 
    struct GENX(STATE_BASE_ADDRESS) sba = {};
    fill_state_base_addr(cmd_buffer, &sba);
@@ -457,6 +445,8 @@ genX(cmd_buffer_emit_bt_pool_base_address)(struct anv_cmd_buffer *cmd_buffer)
 {
    if (!anv_cmd_buffer_is_render_or_compute_queue(cmd_buffer))
       return;
+
+   assert(!cmd_buffer->device->physical->uses_efficient_64bit);
 
 #if GFX_VERx10 >= 125
    struct anv_address btp = anv_cmd_buffer_surface_base_address(cmd_buffer);
@@ -2889,7 +2879,7 @@ emit_samplers(struct anv_cmd_buffer *cmd_buffer,
       return VK_SUCCESS;
    }
 
-   uint32_t size = bind_map->sampler_count * ANV_SAMPLER_STATE_GPU_SIZE(GFX_VERx10);
+   uint32_t size = bind_map->sampler_count * GENX(SAMPLER_STATE_length) * 4;
    *state = anv_cmd_buffer_alloc_dynamic_state(cmd_buffer, size, 32);
 
    if (state->map == NULL)
@@ -2913,9 +2903,9 @@ emit_samplers(struct anv_cmd_buffer *cmd_buffer,
       if (sampler == NULL)
          continue;
 
-      memcpy(state->map + (s * ANV_SAMPLER_STATE_GPU_SIZE(GFX_VERx10)),
+      memcpy(state->map + (s * GENX(SAMPLER_STATE_length) * 4),
              sampler->state.state[binding->plane],
-             ANV_SAMPLER_STATE_GPU_SIZE(GFX_VERx10));
+             GENX(SAMPLER_STATE_length) * 4);
    }
 
    return VK_SUCCESS;
@@ -2928,6 +2918,8 @@ genX(cmd_buffer_flush_descriptor_sets)(struct anv_cmd_buffer *cmd_buffer,
                                        const struct anv_shader **shaders,
                                        uint32_t num_shaders)
 {
+   assert(!cmd_buffer->device->physical->uses_efficient_64bit);
+
    VkShaderStageFlags flushed = 0;
 
    VkResult result = VK_SUCCESS;
@@ -3160,11 +3152,14 @@ emit_pipe_control(struct anv_batch *batch,
     * At the moment it's unclear whether all other parameters should go in the
     * first or second PIPE_CONTROL. It seems logical that it should go to the
     * first so that the timestamp accounts for all the associated flushes.
+    *
+    * TODO: Check if it's the same case with signal on event completion. (i.e
+    * post sync with writeImmedidateData happening before stall has completed)
     */
    if (intel_needs_workaround(devinfo, 18040903259) &&
        batch->engine_class == INTEL_ENGINE_CLASS_RENDER &&
        current_pipeline == GPGPU &&
-       post_sync_op != NoWrite) {
+       post_sync_op == WriteTimestamp) {
       genX(batch_emit_pipe_control)(batch, devinfo, current_pipeline,
                                     bits | ANV_PIPE_CS_STALL_BIT,
                                     "Wa_18040903259");
@@ -3398,11 +3393,13 @@ update_descriptor_set_surface_state(struct anv_cmd_buffer *cmd_buffer,
    const int32_t buffer_index =
       bind_state->descriptor_buffers[set_idx].buffer_index;
    const struct anv_va_range *push_va_range =
-      GFX_VERx10 >= 125 ?
-      anv_physical_device_get_push_descriptor_buffer_pool_va(device) :
-      anv_physical_device_get_internal_surface_state_pool_va(device);
+      device->uses_efficient_64bit ? &device->va.internal_surface_state_pool :
+      GFX_VERx10 >= 125 ? &device->va.push_descriptor_buffer_pool :
+      &device->va.internal_surface_state_pool;
    const struct anv_va_range *va_range =
-      buffer_index == -1 ? push_va_range : anv_physical_device_get_dynamic_visible_pool_va(device);
+      buffer_index == -1 ? push_va_range :
+      device->uses_efficient_64bit ? &device->va.bindless_surface_state_pool :
+      &device->va.dynamic_visible_pool;
    const uint64_t descriptor_set_addr =
       (buffer_index == -1 ? va_range->addr :
        cmd_buffer->state.descriptor_buffers.address[buffer_index]) +
@@ -3435,10 +3432,27 @@ compute_descriptor_set_surface_offset(const struct anv_cmd_buffer *cmd_buffer,
                                       const struct anv_bind_point_state *bind_state,
                                       const uint32_t set_idx)
 {
-   const struct anv_physical_device *device = cmd_buffer->device->physical;
+   UNUSED const struct anv_physical_device *device = cmd_buffer->device->physical;
    const int32_t buffer_index =
       bind_state->descriptor_buffers[set_idx].buffer_index;
 
+#if GFX_VERx10 >= 350
+   if (device->uses_efficient_64bit) {
+      const uint64_t base_heap_address =
+         buffer_index == -1 ?
+         device->va.internal_surface_state_pool.addr :
+         device->va.bindless_surface_state_pool.addr;
+      const uint64_t buffer_address =
+         buffer_index == -1 ?
+         device->va.internal_surface_state_pool.addr :
+         cmd_buffer->state.descriptor_buffers.address[buffer_index];
+
+      return (buffer_address - base_heap_address) +
+              bind_state->descriptor_buffers[set_idx].buffer_offset;
+   }
+#endif
+
+#if GFX_VERx10 >= 125
    if (intel_has_extended_bindless(&device->info)) {
       uint64_t buffer_address =
          buffer_index == -1 ?
@@ -3448,6 +3462,7 @@ compute_descriptor_set_surface_offset(const struct anv_cmd_buffer *cmd_buffer,
       return (buffer_address - anv_physical_device_get_dynamic_visible_pool_va(device)->addr) +
               bind_state->descriptor_buffers[set_idx].buffer_offset;
    }
+#endif
 
    /* Pre Gfx12.0, the push descriptor in EXT_descriptor_buffer mode is always
     * accessed through the binding table. With exception to the descriptor
@@ -3470,14 +3485,22 @@ compute_descriptor_set_sampler_offset(const struct anv_cmd_buffer *cmd_buffer,
                                       const uint32_t set_idx)
 {
    const struct anv_physical_device *device = cmd_buffer->device->physical;
-   int32_t buffer_index =
+   const int32_t buffer_index =
       bind_state->descriptor_buffers[set_idx].buffer_index;
-   uint64_t buffer_address =
+   const uint64_t base_heap_address =
+#if GFX_VERx10 >= 350
+      device->uses_efficient_64bit ?
+      (buffer_index == -1 ?
+       device->va.internal_surface_state_pool.addr :
+       device->va.bindless_surface_state_pool.addr) :
+#endif
+      device->va.dynamic_state_pool.addr;
+   const uint64_t buffer_address =
       buffer_index == -1 ?
-      anv_physical_device_get_push_descriptor_buffer_pool_va(device)->addr :
+      device->va.push_descriptor_buffer_pool.addr :
       cmd_buffer->state.descriptor_buffers.address[buffer_index];
 
-   return (buffer_address - anv_physical_device_get_dynamic_state_pool_va(device)->addr) +
+   return (buffer_address - base_heap_address) +
           bind_state->descriptor_buffers[set_idx].buffer_offset;
 }
 
@@ -3486,55 +3509,57 @@ genX(flush_binding_mode)(struct anv_cmd_buffer *cmd_buffer,
                          struct anv_bind_point_state *bind_state,
                          VkShaderStageFlags active_stages)
 {
-   assert(cmd_buffer->state.pending_binding_mode != ANV_SHADER_BINDING_MODE_UNKNOWN);
+   anv_cmd_buffer_ensure_valid_binding_mode(cmd_buffer);
 
    /* Decide when to reemit STATE_BASE_ADDRESS */
    bool sba_emitted_changed = false;
-   switch (cmd_buffer->state.pending_binding_mode) {
-   case ANV_SHADER_BINDING_MODE_LEGACY:
-   case ANV_SHADER_BINDING_MODE_LEGACY_INDIRECT:
-      if (cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_LEGACY &&
-          cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_LEGACY_INDIRECT) {
-         genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
-         sba_emitted_changed = true;
-      }
-      break;
-   case ANV_SHADER_BINDING_MODE_BUFFER:
+   if (GFX_VERx10 < 350 || !cmd_buffer->device->physical->uses_efficient_64bit) {
+      switch (cmd_buffer->state.pending_binding_mode) {
+      case ANV_SHADER_BINDING_MODE_LEGACY:
+      case ANV_SHADER_BINDING_MODE_LEGACY_INDIRECT:
+         if (cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_LEGACY &&
+             cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_LEGACY_INDIRECT) {
+            genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
+            sba_emitted_changed = true;
+         }
+         break;
+      case ANV_SHADER_BINDING_MODE_BUFFER:
 #if GFX_VERx10 >= 125
-      if (cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_BUFFER &&
-          cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_HEAP) {
-         genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
-         sba_emitted_changed = true;
-      }
-      cmd_buffer->state.descriptor_buffers.dirty = false;
-#else
-      if (cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_BUFFER ||
-          cmd_buffer->state.descriptor_buffers.dirty) {
-         genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
-         sba_emitted_changed = true;
+         if (cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_BUFFER &&
+             cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_HEAP) {
+            genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
+            sba_emitted_changed = true;
+         }
          cmd_buffer->state.descriptor_buffers.dirty = false;
-      }
-#endif
-      break;
-   case ANV_SHADER_BINDING_MODE_HEAP:
-#if GFX_VERx10 >= 125
-      if (cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_BUFFER &&
-          cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_HEAP) {
-         genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
-         sba_emitted_changed = true;
-      }
-      cmd_buffer->state.descriptor_heap.dirty = false;
 #else
-      if (cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_HEAP ||
-          cmd_buffer->state.descriptor_heap.dirty) {
-         genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
-         sba_emitted_changed = true;
-         cmd_buffer->state.descriptor_heap.dirty = false;
-      }
+         if (cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_BUFFER ||
+             cmd_buffer->state.descriptor_buffers.dirty) {
+            genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
+            sba_emitted_changed = true;
+            cmd_buffer->state.descriptor_buffers.dirty = false;
+         }
 #endif
-      break;
-   default:
-      UNREACHABLE("invalid binding mode");
+         break;
+      case ANV_SHADER_BINDING_MODE_HEAP:
+#if GFX_VERx10 >= 125
+         if (cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_BUFFER &&
+             cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_HEAP) {
+            genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
+            sba_emitted_changed = true;
+         }
+         cmd_buffer->state.descriptor_heap.dirty = false;
+#else
+         if (cmd_buffer->state.current_binding_mode != ANV_SHADER_BINDING_MODE_HEAP ||
+             cmd_buffer->state.descriptor_heap.dirty) {
+            genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
+            sba_emitted_changed = true;
+            cmd_buffer->state.descriptor_heap.dirty = false;
+         }
+#endif
+         break;
+      default:
+         UNREACHABLE("invalid binding mode");
+      }
    }
 
    cmd_buffer->state.current_binding_mode = cmd_buffer->state.pending_binding_mode;
@@ -3611,7 +3636,9 @@ genX(flush_binding_mode)(struct anv_cmd_buffer *cmd_buffer,
 
    case ANV_SHADER_BINDING_MODE_LEGACY:
    case ANV_SHADER_BINDING_MODE_LEGACY_INDIRECT: {
-      if (!sba_emitted_changed && cmd_buffer->state.descriptors_dirty == 0)
+      if (!sba_emitted_changed &&
+          cmd_buffer->state.descriptors_dirty == 0 &&
+          cmd_buffer->state.push_descriptors_dirty == 0)
          break;
 
       uint32_t dyn_set_offset = 0;
@@ -3684,7 +3711,8 @@ genX(cmd_buffer_begin_companion)(struct anv_cmd_buffer *cmd_buffer,
    cmd_buffer->state.current_binding_mode =
       cmd_buffer->state.pending_binding_mode =
       ANV_SHADER_BINDING_MODE_LEGACY;
-   genX(cmd_buffer_emit_bt_pool_base_address)(cmd_buffer);
+   if (GFX_VERx10 < 350 || !cmd_buffer->device->physical->uses_efficient_64bit)
+      genX(cmd_buffer_emit_bt_pool_base_address)(cmd_buffer);
 
    /* Invalidate the aux table in every primary command buffer. This ensures
     * the command buffer see the last updates made by the host.
@@ -3992,6 +4020,7 @@ genX(BeginCommandBuffer)(
     const VkCommandBufferBeginInfo*             pBeginInfo)
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+   struct anv_device *device = cmd_buffer->device;
    VkResult result;
 
    /* If this is the first vkBeginCommandBuffer, we must *initialize* the
@@ -4059,7 +4088,7 @@ genX(BeginCommandBuffer)(
        * ensures the command buffer see the last updates made by the host.
        */
       if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY &&
-          cmd_buffer->device->info->has_aux_map) {
+          device->info->has_aux_map) {
          anv_add_pending_pipe_bits(cmd_buffer,
                                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
@@ -4075,20 +4104,23 @@ genX(BeginCommandBuffer)(
       genX(cmd_buffer_set_protected_memory)(cmd_buffer, true);
 #endif
 
-   if (cmd_buffer->device->vk.enabled_extensions.EXT_descriptor_buffer) {
-      genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
-   } else {
-      cmd_buffer->state.current_binding_mode =
-         cmd_buffer->state.pending_binding_mode =
-         ANV_SHADER_BINDING_MODE_LEGACY;
-      genX(cmd_buffer_emit_bt_pool_base_address)(cmd_buffer);
+   anv_cmd_buffer_ensure_valid_binding_mode(cmd_buffer);
+   if (GFX_VERx10 < 350 || !device->physical->uses_efficient_64bit) {
+      if (device->vk.enabled_extensions.EXT_descriptor_buffer) {
+         genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
+      } else {
+         cmd_buffer->state.current_binding_mode =
+            cmd_buffer->state.pending_binding_mode =
+            ANV_SHADER_BINDING_MODE_LEGACY;
+         genX(cmd_buffer_emit_bt_pool_base_address)(cmd_buffer);
+      }
    }
 
    /* Invalidate the aux table in every primary command buffer. This ensures
     * the command buffer see the last updates made by the host.
     */
    if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY &&
-       cmd_buffer->device->info->has_aux_map) {
+       device->info->has_aux_map) {
       anv_add_pending_pipe_bits(cmd_buffer,
                                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
@@ -4164,7 +4196,7 @@ genX(BeginCommandBuffer)(
     *
     * Do not change that when we're continuing a previous renderpass.
     */
-   if (cmd_buffer->device->vk.enabled_extensions.EXT_sample_locations &&
+   if (device->vk.enabled_extensions.EXT_sample_locations &&
        !(cmd_buffer->usage_flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT))
       genX(emit_sample_pattern)(&cmd_buffer->batch, NULL);
 
@@ -4672,26 +4704,28 @@ genX(CmdExecuteCommands)(
       BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_FSR);
    }
 
-   /* Each of the secondary command buffers will use its own state base
-    * address.  We need to re-emit state base address for the container after
-    * all of the secondaries are done.
-    */
-   if (container->device->vk.enabled_extensions.EXT_descriptor_buffer) {
-#if GFX_VERx10 >= 125
-      /* If the last secondary had a different mode, reemit the last pending
-       * mode. Otherwise, we can do a lighter binding table pool update.
+   if (GFX_VERx10 < 350 || !device->physical->uses_efficient_64bit) {
+      /* Each of the secondary command buffers will use its own state base
+       * address.  We need to re-emit state base address for the container after
+       * all of the secondaries are done.
        */
-      if (binding_mode != container->state.current_binding_mode) {
-         container->state.current_binding_mode = binding_mode;
+      if (container->device->vk.enabled_extensions.EXT_descriptor_buffer) {
+#if GFX_VERx10 >= 125
+         /* If the last secondary had a different mode, reemit the last pending
+          * mode. Otherwise, we can do a lighter binding table pool update.
+          */
+         if (binding_mode != container->state.current_binding_mode) {
+            container->state.current_binding_mode = binding_mode;
+            genX(cmd_buffer_emit_state_base_address)(container);
+         } else {
+            genX(cmd_buffer_emit_bt_pool_base_address)(container);
+         }
+#else
          genX(cmd_buffer_emit_state_base_address)(container);
+#endif
       } else {
          genX(cmd_buffer_emit_bt_pool_base_address)(container);
       }
-#else
-      genX(cmd_buffer_emit_state_base_address)(container);
-#endif
-   } else {
-      genX(cmd_buffer_emit_bt_pool_base_address)(container);
    }
 
    /* Copy of utrace timestamp buffers from secondary into container */
@@ -6313,7 +6347,7 @@ genX(cmd_buffer_emit_depth_stencil)(struct anv_cmd_buffer *cmd_buffer,
       const struct anv_address depth_address =
          anv_image_address(image, &depth_surface->memory_range);
 
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs, depth_address.bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, depth_address.bo);
 
       info.depth_surf = &depth_surface->isl;
       info.depth_address = anv_address_physical(depth_address);
@@ -6332,7 +6366,7 @@ genX(cmd_buffer_emit_depth_stencil)(struct anv_cmd_buffer *cmd_buffer,
          const struct anv_address hiz_address =
             anv_image_address(image, &hiz_surface->memory_range);
 
-         anv_reloc_list_add_bo(cmd_buffer->batch.relocs, hiz_address.bo);
+         anv_cmd_buffer_add_reloc_bo(cmd_buffer, hiz_address.bo);
 
          info.hiz_surf = &hiz_surface->isl;
          info.hiz_address = anv_address_physical(hiz_address);
@@ -6350,7 +6384,7 @@ genX(cmd_buffer_emit_depth_stencil)(struct anv_cmd_buffer *cmd_buffer,
       const struct anv_address stencil_address =
          anv_image_address(image, &stencil_surface->memory_range);
 
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs, stencil_address.bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, stencil_address.bo);
 
       info.stencil_surf = &stencil_surface->isl;
 
@@ -6419,7 +6453,7 @@ cmd_buffer_emit_cps_control_buffer(struct anv_cmd_buffer *cmd_buffer,
    if (fsr_iview) {
       const struct anv_image_binding *binding = &fsr_iview->image->bindings[0];
 
-      anv_reloc_list_add_bo(cmd_buffer->batch.relocs, binding->address.bo);
+      anv_cmd_buffer_add_reloc_bo(cmd_buffer, binding->address.bo);
 
       struct anv_address addr =
          anv_address_add(binding->address, binding->memory_range.offset);
@@ -7592,43 +7626,86 @@ void genX(cmd_emit_timestamp)(struct anv_batch *batch,
 
 #if GFX_VERx10 >= 125
    case ANV_TIMESTAMP_REWRITE_COMPUTE_WALKER: {
-      uint32_t dwords[GENX(COMPUTE_WALKER_length)];
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         uint32_t dwords[GENX(COMPUTE_WALKER_2_length)];
 
-      GENX(COMPUTE_WALKER_pack)(batch, dwords, &(struct GENX(COMPUTE_WALKER)) {
-            .body = {
-               .PostSync = (struct GENX(POSTSYNC_DATA)) {
-                  .Operation = WriteTimestamp,
-                  .DestinationAddress = addr,
-                  .MOCS = anv_mocs(device, NULL, 0),
-               },
-            }
-         });
+         GENX(COMPUTE_WALKER_2_pack)(batch, dwords, &(struct GENX(COMPUTE_WALKER_2)) {
+               .body = {
+                  .Post_sync_opn0 = (struct GENX(POSTSYNC_DATA_2)) {
+                     .Operation = WriteTimestamp,
+                     .DestinationAddress = addr,
+                     .MOCS = anv_mocs(device, NULL, 0),
+                  },
+               }
+            });
 
-      for (uint32_t i = 0; i < ARRAY_SIZE(dwords); i++) {
-         if (dwords[i])
-            ((uint32_t *)data)[i] |= dwords[i];
+         for (uint32_t i = 0; i < ARRAY_SIZE(dwords); i++) {
+            if (dwords[i])
+               ((uint32_t *)data)[i] |= dwords[i];
+         }
+#endif
+      } else {
+         uint32_t dwords[GENX(COMPUTE_WALKER_length)];
+
+         GENX(COMPUTE_WALKER_pack)(batch, dwords, &(struct GENX(COMPUTE_WALKER)) {
+               .body = {
+                  .PostSync = (struct GENX(POSTSYNC_DATA)) {
+                     .Operation = WriteTimestamp,
+                     .DestinationAddress = addr,
+                     .MOCS = anv_mocs(device, NULL, 0),
+                  },
+               }
+            });
+
+         for (uint32_t i = 0; i < ARRAY_SIZE(dwords); i++) {
+            if (dwords[i])
+               ((uint32_t *)data)[i] |= dwords[i];
+         }
       }
       break;
    }
 
    case ANV_TIMESTAMP_REWRITE_INDIRECT_DISPATCH: {
-      uint32_t dwords[GENX(EXECUTE_INDIRECT_DISPATCH_length)];
+      if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
+#if GFX_VERx10 >= 350
+         uint32_t dwords[GENX(EXECUTE_INDIRECT_DISPATCH_2_length)];
 
-      GENX(EXECUTE_INDIRECT_DISPATCH_pack)
-      (batch, dwords, &(struct GENX(EXECUTE_INDIRECT_DISPATCH)) {
-            .MOCSIndex = MOCS_GET_INDEX(anv_mocs(device, NULL, 0)),
-            .body = {
-               .PostSync = (struct GENX(POSTSYNC_DATA)) {
-                  .Operation = WriteTimestamp,
-                  .DestinationAddress = addr,
+         GENX(EXECUTE_INDIRECT_DISPATCH_2_pack)
+            (batch, dwords, &(struct GENX(EXECUTE_INDIRECT_DISPATCH_2)) {
+               .body = {
+                  .Post_sync_opn0 = (struct GENX(POSTSYNC_DATA_2)) {
+                     .Operation = WriteTimestamp,
+                     .DestinationAddress = addr,
                   .MOCS = anv_mocs(device, NULL, 0),
-               },
-            }
-      });
+                  },
+               }
+            });
 
-      for (uint32_t i = 0; i < ARRAY_SIZE(dwords); i++) {
-         if (dwords[i])
-            ((uint32_t *)data)[i] |= dwords[i];
+         for (uint32_t i = 0; i < ARRAY_SIZE(dwords); i++) {
+            if (dwords[i])
+               ((uint32_t *)data)[i] |= dwords[i];
+         }
+#endif
+      } else {
+         uint32_t dwords[GENX(EXECUTE_INDIRECT_DISPATCH_length)];
+
+         GENX(EXECUTE_INDIRECT_DISPATCH_pack)
+            (batch, dwords, &(struct GENX(EXECUTE_INDIRECT_DISPATCH)) {
+               .MOCSIndex = MOCS_GET_INDEX(anv_mocs(device, NULL, 0)),
+               .body = {
+                  .PostSync = (struct GENX(POSTSYNC_DATA)) {
+                     .Operation = WriteTimestamp,
+                     .DestinationAddress = addr,
+                  .MOCS = anv_mocs(device, NULL, 0),
+                  },
+               }
+            });
+
+         for (uint32_t i = 0; i < ARRAY_SIZE(dwords); i++) {
+            if (dwords[i])
+               ((uint32_t *)data)[i] |= dwords[i];
+         }
       }
       break;
    }

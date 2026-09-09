@@ -297,7 +297,8 @@ typedef struct {
 static const StageMapping stage_lut[] = {
    {VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
        VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
-       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT |
+       VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
     MTL_RENDER_STAGE_TILE},
 
    {VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
@@ -311,25 +312,34 @@ static const StageMapping stage_lut[] = {
 
    {VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
        VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+       VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
+       VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
+       VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT |
        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
        VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
-       VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT,
+       VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+       VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT |
+       VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
     MTL_RENDER_STAGE_VERTEX},
 };
 
 static enum mtl_render_stages
 kk_pipeline_stages_to_mtl_render_stage(VkPipelineStageFlags2 vk_flags)
 {
-   if (vk_flags == VK_PIPELINE_STAGE_2_NONE) {
-      return 0;
-   }
+   /* `stage` is a first synchronization scope, where TOP_OF_PIPE and NONE both
+    * mean no stage of execution. */
+   if (vk_flags == VK_PIPELINE_STAGE_2_NONE)
+      return MTL_RENDER_STAGE_VERTEX;
 
    for (size_t i = 0; i < ARRAY_SIZE(stage_lut); ++i) {
       if (vk_flags & stage_lut[i].vk_flags) {
          return stage_lut[i].stage;
       }
    }
-   return 0;
+
+   /* There are currently no restrictions on non-renderpass stages being passed to
+    * vkCmdWriteTimestamp*() in a renderpass, map them to the last stage */
+   return MTL_RENDER_STAGE_TILE;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -356,7 +366,7 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
    };
 
    /* non-gfx or not found*/
-   if (cmd->gfx.encoder && mtl_stage) {
+   if (cmd->gfx.encoder) {
       uint64_t addr = kk_query_available_addr(pool, query);
       for (uint32_t i = 0; i < count; i++) {
          libkk_write_u32(cmd, kk_grid_1d(1), false, addr, true);
@@ -539,14 +549,13 @@ kk_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
 }
 
 VKAPI_ATTR void VKAPI_CALL
-kk_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
-                           uint32_t firstQuery, uint32_t queryCount,
-                           VkBuffer dstBuffer, VkDeviceSize dstOffset,
-                           VkDeviceSize stride, VkQueryResultFlags flags)
+kk_CmdCopyQueryPoolResultsToMemoryKHR(
+   VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery,
+   uint32_t queryCount, const VkStridedDeviceAddressRangeKHR *pDstRange,
+   VkAddressCommandFlagsKHR dstFlags, VkQueryResultFlags flags)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
-   VK_FROM_HANDLE(kk_buffer, dst_buf, dstBuffer);
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
 
    /* Timestamp results are resolved into the pool BO on a deferred command
@@ -568,8 +577,8 @@ kk_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
       .availability = pool->bo->gpu,
       .results = results_bo->gpu + pool->query_start,
       .oq_index = pool->bo->gpu + pool->index_start,
-      .dst_addr = dst_buf->vk.device_address + dstOffset,
-      .dst_stride = stride,
+      .dst_addr = pDstRange->address,
+      .dst_stride = pDstRange->stride,
       .first_query = firstQuery,
       .flags = flags,
       .reports_per_query = kk_reports_per_query(pool),

@@ -93,7 +93,6 @@
 
 #define ANV_SAMPLER_STATE_SIZE (32)
 #define ANV_SAMPLER_STATE_DWORDS (ANV_SAMPLER_STATE_SIZE / sizeof(uint32_t))
-#define ANV_SAMPLER_STATE_GPU_SIZE(verx10) (16)
 
 /* For gfx12 we set the streamout buffers using 4 separate commands
  * (3DSTATE_SO_BUFFER_INDEX_*) instead of 3DSTATE_SO_BUFFER. However the layout
@@ -130,10 +129,21 @@ struct anv_drv_push_data {
 
    union {
       struct {
-         /** Dynamic MSAA value */
+         /** Dynamic FS configuration value (see intel_fs_config) */
          uint32_t fs_config;
 
-         /** Dynamic TCS/TES configuration */
+         /** Fragment shader attachments RENDER_SURFACE_STATE location in
+          * internal heap (Gfx35+)
+          */
+         uint32_t fs_color_offset;
+
+         /** Fragment shader output remapping (Gfx35+)
+          *
+          * 8 elements of 4bits for each color output
+          */
+         uint32_t fs_color_map;
+
+         /** Dynamic TCS/TES configuration (see intel_tess_configs) */
          uint32_t tess_config;
 
          /** Robust access pushed registers. */
