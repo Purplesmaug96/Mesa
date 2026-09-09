@@ -845,7 +845,15 @@ xenos_upload_constants(struct xenos_context *x, struct xenos_shader *sh,
       }
       (void)vv;
    }
+   if (stage == MESA_SHADER_VERTEX)
+      DbgPrint("[CONST] num_vec4s=%u num_ubos=%u num_consts=%u",
+               num_vec4s, sh->num_ubos, sh->num_consts);
    for (unsigned i = sh->num_ubos; i < sh->num_consts; ++i) {
+      if (stage == MESA_SHADER_VERTEX && i < sh->num_ubos + 8) {
+         const uint32_t *cv = &sh->const_values[(i - sh->num_ubos) * 4];
+         DbgPrint("[CONST] slot%u = %08x %08x %08x %08x",
+                  i, cv[0], cv[1], cv[2], cv[3]);
+      }
       xe_gpu_cmd_reg_writen(&x->cb, XE_REG_SHADER_CONST(base + i), 4,
                             (const uint32_t *)(sh->const_values +
                                                (i - sh->num_ubos) * 4));
@@ -1078,9 +1086,9 @@ xenos_clear(struct pipe_context *pipe, unsigned buffers,
    if (x->clear_vert) {
       float zc = (float)(2.0 * depth - 1.0);
       float *cv = (float *)x->clear_vert;
-      cv[ 0] = -6.0f; cv[ 1] = -6.0f; cv[ 2] = zc; cv[ 3] = 1.0f;
-      cv[ 4] =  6.0f; cv[ 5] = -6.0f; cv[ 6] = zc; cv[ 7] = 1.0f;
-      cv[ 8] = -6.0f; cv[ 9] =  6.0f; cv[10] = zc; cv[11] = 1.0f;
+      cv[ 0] = -1.0f; cv[ 1] = -1.0f; cv[ 2] = zc; cv[ 3] = 1.0f;
+      cv[ 4] =  3.0f; cv[ 5] = -1.0f; cv[ 6] = zc; cv[ 7] = 1.0f;
+      cv[ 8] = -1.0f; cv[ 9] =  3.0f; cv[10] = zc; cv[11] = 1.0f;
       xenos_vertex_fetch vf = { 0 };
       xe_gpu_vfetch_build(&vf, x->clear_vert_phys, 48u, XE_ENDIAN_8IN32);
       ctx_reserve(x, 3);
@@ -1101,12 +1109,34 @@ xenos_draw_vbo(struct pipe_context *pipe,
 {
    struct xenos_context *x = xenos_context(pipe);
 
-   DbgPrint("[VFDPROBE] xenos_draw_vbo vs=%p fs=%p n=%u idx=%d",
-            x->vs, x->fs, num_draws, dinfo->index_size);
+DbgPrint("[VFDPROBE] xenos_draw_vbo vs=%p fs=%p n=%u idx=%d mode=%u",
+            x->vs, x->fs, num_draws, dinfo->index_size, dinfo->mode);
    if (!x->vs || !x->fs || indirect || dinfo->index_size)
       return;                     /* indexed path arrives with M2 */
 
    for (unsigned d = 0; d < num_draws; d++) {
+      DbgPrint("[VFDPROBE] draw d=%u count=%u start=%u", d,
+               draws[d].count, draws[d].start);
+if (x->num_vertex_elements && x->vertex_buffers[0].buffer.resource) {
+          struct xenos_velems *velems = x->vertex_elements;
+          for (unsigned ei = 0; ei < MIN2(velems->count, 2u); ei++) {
+             const struct pipe_vertex_element *el = &velems->elements[ei];
+             const struct pipe_vertex_buffer *vb =
+                &x->vertex_buffers[el->vertex_buffer_index];
+             const uint8_t *vd =
+                (const uint8_t *)xenos_resource(vb->buffer.resource)->data;
+             DbgPrint("[DRAWV] e%u buf=%u vb_off=%u count=%u stride=%u src_off=%u fmt=%u",
+                      ei, el->vertex_buffer_index, vb->buffer_offset, draws[d].count,
+                      el->src_stride, el->src_offset, el->src_format);
+             unsigned lim = MIN2(draws[d].count, 40u);
+             for (unsigned k = 0; k < lim; k++) {
+                const float *f = (const float *)(vd + vb->buffer_offset +
+                                                 el->src_offset +
+                                                 (uint64_t)k * el->src_stride);
+                DbgPrint("[DRAWV] e%u v%02u %.3f %.3f %.3f", ei, k, f[0], f[1], f[2]);
+             }
+          }
+       }
       xenos_emit_frame_state(x);
       xenos_patch_vfetch(x);
       xenos_load_shader(x, x->vs, 0);

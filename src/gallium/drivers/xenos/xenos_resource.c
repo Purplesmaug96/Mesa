@@ -63,12 +63,23 @@ xenos_resource_create(struct pipe_screen *screen,
     * resolve backing VdSwap can sample after kCopy. */
    if (templ->target != PIPE_BUFFER &&
        (templ->bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL))) {
-      unsigned bpb = blocksize;
+      unsigned bpp = blocksize * 8;
       unsigned pitch_px = MAX2(1u, templ->width0);
 
+      /* The Xenos EDRAM is laid out as 2048 tiles of 80x16 32bpp samples
+       * (5120 bytes each), addressed per RB_COLOR_INFO/DEPTH_INFO base in
+       * xenia's numbering.  The tile span of a surface is computed as
+       * (pitch rounded up to the 80-sample tile width) x (height rounded up
+       * to 16).  64bpp surfaces take twice the tiles per row.  Surfaces must
+       * be allocated contiguously in this numbering or their spans overlap,
+       * which corrupts ownership tracking and makes resolves sample the wrong
+       * render target for half the screen. */
       res->has_edram = 1;
-      res->edram_pitch_tiles = (pitch_px * bpb + 2047u) / 2048u;
-      res->edram_rows = (templ->height0 + 7u) / 8u;
+      unsigned pitch_samples = bpp > 32 ? pitch_px * 2 : pitch_px;
+      res->edram_pitch_tiles = (pitch_samples + 79u) / 80u;
+      if (bpp > 32)
+         res->edram_pitch_tiles <<= 1;
+      res->edram_rows = (templ->height0 + 15u) / 16u;
       res->edram_base = xs->next_edram_tile;
       xs->next_edram_tile += res->edram_pitch_tiles * res->edram_rows;
 
