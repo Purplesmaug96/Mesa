@@ -13,6 +13,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <xecore/xboxkrnl.h>
 
@@ -480,10 +482,10 @@ xenos_set_constant_buffer(struct pipe_context *pipe,
    if (shader != MESA_SHADER_VERTEX && shader != MESA_SHADER_FRAGMENT)
       return;
 
-   pipe_resource_reference(&x->constant_buffer[index].buffer, NULL);
+   pipe_resource_reference(&x->constant_buffer[shader].buffer, NULL);
    if (cb) {
-      x->constant_buffer[index] = *cb;
-      pipe_resource_reference(&x->constant_buffer[index].buffer, cb->buffer);
+      x->constant_buffer[shader] = *cb;
+      pipe_resource_reference(&x->constant_buffer[shader].buffer, cb->buffer);
    }
 }
 
@@ -549,6 +551,21 @@ xenos_set_vertex_buffers(struct pipe_context *pipe,
    for (unsigned i = 0; i < count; i++) {
       pipe_vertex_buffer_unreference(&x->vertex_buffers[i]);
       pipe_vertex_buffer_reference(&x->vertex_buffers[i], &buffers[i]);
+      if (buffers[i].is_user_buffer) {
+         const float *vf = (const float *)buffers[i].buffer.user;
+         DbgPrint("[nisvb] i=%u off=%u ubo f0..11=%f %f %f %f %f %f %f %f %f %f %f %f",
+                  i, buffers[i].buffer_offset,
+                  vf[0],vf[1],vf[2],vf[3],vf[4],vf[5],vf[6],vf[7],vf[8],vf[9],vf[10],vf[11]);
+      } else if (buffers[i].buffer.resource) {
+         struct xenos_resource *res = xenos_resource(buffers[i].buffer.resource);
+         const float *vf = (const float *)(res->data + buffers[i].buffer_offset);
+         DbgPrint("[nisvb] i=%u off=%u res gpuaddr=0x%llx f0..7=%f %f %f %f %f %f %f %f",
+                  i, buffers[i].buffer_offset,
+                  (unsigned long long)res->gpu_addr,
+                  vf[0],vf[1],vf[2],vf[3],vf[4],vf[5],vf[6],vf[7]);
+      } else {
+         DbgPrint("[nisvb] i=%u EMPTY", i);
+      }
    }
    x->num_vertex_buffers = MAX2(x->num_vertex_buffers, count);
 }
@@ -604,7 +621,7 @@ xenos_prim_to_initiator(struct xenos_context *x, unsigned mode, unsigned count)
       [MESA_PRIM_TRIANGLES]     = 4,
       [MESA_PRIM_TRIANGLE_STRIP]= 5,
       [MESA_PRIM_TRIANGLE_FAN]  = 6,
-      [MESA_PRIM_QUADS]         = 4,   /* st lowers; fall back to tris */
+      [MESA_PRIM_QUADS]         = 5,   /* draw 4 verts as a triangle strip */
       [MESA_PRIM_LINES_ADJACENCY]= 2,
    };
    uint32_t prim = mode < MESA_PRIM_MAX && map[mode] ? map[mode] : 4u;
@@ -817,43 +834,24 @@ xenos_upload_constants(struct xenos_context *x, struct xenos_shader *sh,
       return;
    }
 
-   if (stage == MESA_SHADER_VERTEX && num_vec4s >= 4) {
-      const float *m = (const float *)data;
-      DbgPrint("[VBCHECK] MVP(upload) c0 %.4f %.4f %.4f %.4f", m[0], m[1], m[2], m[3]);
-      DbgPrint("[VBCHECK]             c1 %.4f %.4f %.4f %.4f", m[4], m[5], m[6], m[7]);
-      DbgPrint("[VBCHECK]             c2 %.4f %.4f %.4f %.4f", m[8], m[9], m[10], m[11]);
-      DbgPrint("[VBCHECK]             c3 %.4f %.4f %.4f %.4f", m[12], m[13], m[14], m[15]);
+   uint32_t base = stage == MESA_SHADER_FRAGMENT
+                   ? (XE_PS_CONST_REG_BASE + XE_FS_CONST_CODEGEN_BASE)
+                   : 0u;
+   { /* TEMP DBG: dump const rows */
+      const uint8_t *db = cbuf->user_buffer ? cbuf->user_buffer :
+                         (cbuf->buffer ? xenos_resource(cbuf->buffer)->data : NULL);
+      DbgPrint("[msconst] stage=%d num_ubos=%u num_consts=%u buf_size=%u user=%d db=%p", stage, sh->num_ubos, sh->num_consts, cbuf->buffer_size, !!cbuf->user_buffer, db);
+      if (db) for (unsigned r = 0; r < MIN2(num_vec4s, 8u); ++r) {
+         const float *fv = (const float*)(db + r*16);
+         DbgPrint("[msconst] stage=%d c[%u] %f %f %f %f", stage, r, fv[0],fv[1],fv[2],fv[3]);
+      }
    }
-
-   uint32_t base = stage == MESA_SHADER_FRAGMENT ? 256u : 0u;
    ctx_reserve(x, (num_vec4s + sh->num_consts - sh->num_ubos) * 5);
    for (unsigned i = 0; i < num_vec4s; ++i) {
       xe_gpu_cmd_reg_writen(&x->cb, XE_REG_SHADER_CONST(base + i), 4,
                             (const uint32_t *)(data + i * 16));
    }
-   if (stage == MESA_SHADER_VERTEX && num_vec4s >= 4) {
-      /* Read back the dwords just written into the host-owned PM4 CB. */
-      const uint32_t *p = &x->cb.dwords[x->cb.used];
-      /* find start: reg writes were the last 4 groups of 5 dwords */
-      p = &x->cb.dwords[x->cb.used - num_vec4s * 5];
-      const float *vv = NULL;
-      for (unsigned i = 0; i < num_vec4s; i++) {
-         DbgPrint("[PM4MVP] c%u %08x %08x %08x %08x  = %.4f %.4f %.4f %.4f",
-                  i, p[i*5+1], p[i*5+2], p[i*5+3], p[i*5+4],
-                  *(const float *)&p[i*5+1], *(const float *)&p[i*5+2],
-                  *(const float *)&p[i*5+3], *(const float *)&p[i*5+4]);
-      }
-      (void)vv;
-   }
-   if (stage == MESA_SHADER_VERTEX)
-      DbgPrint("[CONST] num_vec4s=%u num_ubos=%u num_consts=%u",
-               num_vec4s, sh->num_ubos, sh->num_consts);
    for (unsigned i = sh->num_ubos; i < sh->num_consts; ++i) {
-      if (stage == MESA_SHADER_VERTEX && i < sh->num_ubos + 8) {
-         const uint32_t *cv = &sh->const_values[(i - sh->num_ubos) * 4];
-         DbgPrint("[CONST] slot%u = %08x %08x %08x %08x",
-                  i, cv[0], cv[1], cv[2], cv[3]);
-      }
       xe_gpu_cmd_reg_writen(&x->cb, XE_REG_SHADER_CONST(base + i), 4,
                             (const uint32_t *)(sh->const_values +
                                                (i - sh->num_ubos) * 4));
@@ -897,53 +895,23 @@ xenos_patch_vfetch(struct xenos_context *x)
    struct xenos_velems *ve = x->vertex_elements;
    const struct pipe_vertex_element *elements;
 
-   fprintf(stderr, "[VFDPROBE] vfetch_count=%u num_ve=%u vs=%p ve=%p\n",
-           vs ? vs->vfetch_count : 99, x->num_vertex_elements, vs, ve);
-   DbgPrint("[VFDPROBE] vfetch_count=%u num_ve=%u vs=%p ve=%p",
-            vs ? vs->vfetch_count : 99, x->num_vertex_elements, (void *)vs,
-            (void *)ve);
 if (!vs || !vs->vfetch_count || !ve)
        return;
     elements = ve->elements;
-    DbgPrint("[VFDPROBE] VELEMS nve=%u:", x->num_vertex_elements);
-    for (uint32_t ei = 0; ei < x->num_vertex_elements && ei < PIPE_MAX_ATTRIBS; ++ei)
-       DbgPrint("[VFDPROBE] VELEM elem=%u buf=%u off=%u fmt=%u stride=%u",
-                ei, elements[ei].vertex_buffer_index, elements[ei].src_offset,
-                elements[ei].src_format, elements[ei].src_stride);
 
     for (uint32_t f = 0; f < vs->vfetch_count; ++f) {
        struct xenos_vfetch_fixup *fx = &vs->vfetch[f];
        const struct pipe_vertex_element *e = NULL;
        struct pipe_vertex_buffer *vb;
        uint32_t phys, out[3];
-       DbgPrint("[VFDPROBE] VFIXUP f=%u attrib=%u nve=%u skip=%d",
-                f, fx->attrib, x->num_vertex_elements,
-                (fx->attrib >= x->num_vertex_elements));
 
        if (fx->attrib >= x->num_vertex_elements ||
            fx->attrib >= PIPE_MAX_ATTRIBS)
           continue;
-      e = &elements[fx->attrib];
+       e = &elements[fx->attrib];
       vb = &x->vertex_buffers[e->vertex_buffer_index];
       if (!vb)
          continue;
-      DbgPrint("[VFDPROBE] vfetch attrib=%u is_user=%d res=%p vb=%d stride=%u",
-               fx->attrib, vb->is_user_buffer, vb->buffer.resource,
-               e->vertex_buffer_index, e->src_stride);
-
-      if (fx->attrib == 0) {
-         const uint8_t *v0 = vb->is_user_buffer ? vb->buffer.user :
-            (const uint8_t *)xenos_resource(vb->buffer.resource)->data +
-            vb->buffer_offset;
-         DbgPrint("[VBCHECK] elem0 off=%u fmt=%u stride=%u ncomp=%u",
-                  e->src_offset, e->src_format, e->src_stride,
-                  util_format_get_nr_components(e->src_format));
-         for (unsigned k = 0; k < 12; k++) {
-            const float *f = (const float *)(v0 + e->src_offset +
-                                             (uint64_t)k * e->src_stride);
-            DbgPrint("[VBCHECK] v%02u %.3f %.3f %.3f", k, f[0], f[1], f[2]);
-         }
-      }
 
       if (!vb->is_user_buffer && vb->buffer.resource)
          phys = (xenos_resource(vb->buffer.resource)->gpu_addr << 2) +
@@ -1004,17 +972,67 @@ xe_ucode_vfetch(out, fx->attrib, fx->dst_gpr, XE_UCODE_DST_SWIZ_XYZW,
       } else
          continue;
 
-      DbgPrint("[VFDPROBE] fc elem=%u phys=%08x data_va=%08x off=%u stride=%u size=%u",
-               i, phys,
-               (uint32_t)(uintptr_t)xenos_resource(vb->buffer.resource)->data,
-               e->src_offset, e->src_stride, fetch_bytes);
-
       xe_gpu_vfetch_build(&vf, phys, MAX2(fetch_bytes, 4u),
                           XE_ENDIAN_8IN32);
       ctx_reserve(x, 3);
       xe_gpu_cmd_reg_writen(&x->cb,
                             XE_REG_SHADER_CONST_FETCH(i / 3) + 2 * (i % 3), 2,
                             (const uint32_t *)&vf);
+   }
+}
+
+/* Emit the texture fetch constants (xe_gpu_texture_fetch_t, 6 dwords each)
+ * for the currently-bound fragment sampler views, at the fetch-constant
+ * register block the FS tex instructions reference (unit + base).  The FS
+ * codegen uses the same mapping, so unit 0 -> fetch constant index
+ * XE_TEX_FETCH_INDEX_BASE. */
+static void
+xenos_emit_texture_fetch_constants(struct xenos_context *x)
+{
+   for (unsigned unit = 0; unit < x->num_sampler_views; unit++) {
+      struct pipe_sampler_view *view = x->sampler_views[unit];
+      if (!view || !view->texture)
+         continue;
+      if (view->texture->target != PIPE_TEXTURE_2D)
+         continue;
+
+      struct xenos_resource *res = xenos_resource(view->texture);
+      uint32_t fc_index = unit + XE_TEX_FETCH_INDEX_BASE;
+      if (fc_index > 31)
+         continue;
+
+      uint32_t mag = XE_TFETCH_FILTER_LINEAR;
+      uint32_t min = XE_TFETCH_FILTER_LINEAR;
+      uint32_t mip = XE_TFETCH_FILTER_POINT;
+      uint32_t clamp = XE_TFETCH_CLAMP_REPEAT;
+      if (unit < x->num_samplers && x->samplers[unit]) {
+         struct pipe_sampler_state *s = x->samplers[unit];
+         mag = (s->mag_img_filter == PIPE_TEX_FILTER_NEAREST)
+                  ? XE_TFETCH_FILTER_POINT : XE_TFETCH_FILTER_LINEAR;
+         min = (s->min_img_filter == PIPE_TEX_FILTER_NEAREST)
+                  ? XE_TFETCH_FILTER_POINT : XE_TFETCH_FILTER_LINEAR;
+         mip = (s->min_mip_filter == PIPE_TEX_MIPFILTER_LINEAR)
+                  ? XE_TFETCH_FILTER_LINEAR : XE_TFETCH_FILTER_POINT;
+         switch (s->wrap_s) {
+         case PIPE_TEX_WRAP_CLAMP_TO_EDGE:
+         case PIPE_TEX_WRAP_MIRROR_CLAMP_TO_EDGE:
+            clamp = XE_TFETCH_CLAMP_TO_EDGE;
+            break;
+         default:
+            clamp = XE_TFETCH_CLAMP_REPEAT;
+            break;
+         }
+      }
+
+      uint32_t dw[6];
+      xe_gpu_tfetch_build(dw, res->gpu_addr << 2,
+                          view->texture->width0, view->texture->height0,
+                          mag, min, mip, clamp,
+                          0x688u /* RGBA identity: R,G,B,A */);
+
+      ctx_reserve(x, 6);
+      xe_gpu_cmd_reg_writen(&x->cb, XE_REG_SHADER_CONST_FETCH(fc_index), 6,
+                            dw);
    }
 }
 
@@ -1027,8 +1045,6 @@ xenos_clear(struct pipe_context *pipe, unsigned buffers,
 {
    struct xenos_context *x = xenos_context(pipe);
 
-   DbgPrint("[VFDPROBE] xenos_clear buffers=%x w=%u", buffers,
-            x->framebuffer.width);
    if (!buffers || !x->framebuffer.width)
       return;
 
@@ -1109,40 +1125,17 @@ xenos_draw_vbo(struct pipe_context *pipe,
 {
    struct xenos_context *x = xenos_context(pipe);
 
-DbgPrint("[VFDPROBE] xenos_draw_vbo vs=%p fs=%p n=%u idx=%d mode=%u",
-            x->vs, x->fs, num_draws, dinfo->index_size, dinfo->mode);
    if (!x->vs || !x->fs || indirect || dinfo->index_size)
       return;                     /* indexed path arrives with M2 */
 
    for (unsigned d = 0; d < num_draws; d++) {
-      DbgPrint("[VFDPROBE] draw d=%u count=%u start=%u", d,
-               draws[d].count, draws[d].start);
-if (x->num_vertex_elements && x->vertex_buffers[0].buffer.resource) {
-          struct xenos_velems *velems = x->vertex_elements;
-          for (unsigned ei = 0; ei < MIN2(velems->count, 2u); ei++) {
-             const struct pipe_vertex_element *el = &velems->elements[ei];
-             const struct pipe_vertex_buffer *vb =
-                &x->vertex_buffers[el->vertex_buffer_index];
-             const uint8_t *vd =
-                (const uint8_t *)xenos_resource(vb->buffer.resource)->data;
-             DbgPrint("[DRAWV] e%u buf=%u vb_off=%u count=%u stride=%u src_off=%u fmt=%u",
-                      ei, el->vertex_buffer_index, vb->buffer_offset, draws[d].count,
-                      el->src_stride, el->src_offset, el->src_format);
-             unsigned lim = MIN2(draws[d].count, 40u);
-             for (unsigned k = 0; k < lim; k++) {
-                const float *f = (const float *)(vd + vb->buffer_offset +
-                                                 el->src_offset +
-                                                 (uint64_t)k * el->src_stride);
-                DbgPrint("[DRAWV] e%u v%02u %.3f %.3f %.3f", ei, k, f[0], f[1], f[2]);
-             }
-          }
-       }
       xenos_emit_frame_state(x);
       xenos_patch_vfetch(x);
       xenos_load_shader(x, x->vs, 0);
       xenos_load_shader(x, x->fs, 1);
       xenos_upload_constants(x, x->vs, MESA_SHADER_VERTEX);
       xenos_upload_constants(x, x->fs, MESA_SHADER_FRAGMENT);
+      xenos_emit_texture_fetch_constants(x);
       xenos_prim_to_initiator(x, dinfo->mode, draws[d].count);
    }
    ctx_submit(x);
@@ -1185,9 +1178,6 @@ xenos_buffer_map(struct pipe_context *pipe,
 
    *out_transfer = transfer;
 
-   DbgPrint("[VFDPROBE] buffer_map res->data=%08x boxx=%u usage=%u size=%u",
-            (uint32_t)(uintptr_t)res->data, box->x, usage, res->size);
-
    return (char *)res->data + box->x;
 }
 
@@ -1223,9 +1213,9 @@ xenos_texture_map(struct pipe_context *pipe,
    *out_transfer = transfer;
 
    unsigned blocksize = util_format_get_blocksize(pres->format);
-   unsigned offset = box->z * transfer->layer_stride +
-                     box->y * res->stride +
-                     box->x * blocksize;
+unsigned offset = box->z * transfer->layer_stride +
+                    box->y * res->stride +
+                    box->x * blocksize;
 
    return (char *)res->data + offset;
 }
@@ -1253,10 +1243,36 @@ xenos_buffer_subdata(struct pipe_context *pipe,
 {
    struct xenos_resource *res = xenos_resource(pres);
 
-   DbgPrint("[VFDPROBE] buffer_subdata data=%08x off=%u size=%u",
-            (uint32_t)(uintptr_t)res->data, offset, size);
-
    memcpy((char *)res->data + offset, data, size);
+}
+
+static void
+xenos_texture_subdata(struct pipe_context *pipe,
+                      struct pipe_resource *pres,
+                      unsigned level, unsigned usage,
+                      const struct pipe_box *box,
+                      const void *data,
+                      unsigned stride, uintptr_t layer_stride)
+{
+   struct xenos_resource *res = xenos_resource(pres);
+   unsigned blocksize = util_format_get_blocksize(pres->format);
+   unsigned row_bytes = box->width * blocksize;
+
+   if (box->depth > 1 && layer_stride == 0)
+      layer_stride = row_bytes;
+   if (box->height > 1 && stride == 0)
+      stride = row_bytes;
+
+   for (unsigned z = 0; z < (unsigned)box->depth; z++) {
+      const uint8_t *src = (const uint8_t *)data + z * layer_stride;
+      uint8_t *dst = (uint8_t *)res->data + z * res->size;
+      dst += box->y * res->stride + box->x * blocksize;
+      for (unsigned y = 0; y < (unsigned)box->height; y++) {
+         memcpy(dst, src, row_bytes);
+         dst += res->stride;
+         src += stride;
+      }
+   }
 }
 
 static void
@@ -1521,6 +1537,7 @@ xenos_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    x->base.texture_unmap = xenos_texture_unmap;
    x->base.transfer_flush_region = xenos_transfer_flush_region;
    x->base.buffer_subdata = xenos_buffer_subdata;
+   x->base.texture_subdata = xenos_texture_subdata;
 
    x->base.stream_uploader = u_upload_create_default(&x->base);
    if (!x->base.stream_uploader) {

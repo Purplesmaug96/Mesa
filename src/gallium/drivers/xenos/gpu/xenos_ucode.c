@@ -101,6 +101,42 @@ uint32_t xe_ucode_alu_build(uint32_t out[3], const xe_ucode_alu *a)
     return 3;
 }
 
+uint32_t xe_ucode_tex(uint32_t out[3], uint32_t dst_reg,
+                      uint32_t src_reg, uint32_t src_swiz,
+                      uint32_t fetch_const, uint32_t dst_swiz,
+                      uint32_t dimension, bool use_register_lod)
+{
+    /* dword0: opcode_value:5 | src_reg:6 | src_reg_am:1 | dst_reg:6 |
+     * dst_reg_am:1 | fetch_valid_only:1 | const_index:5 | tx_coord_denorm:1
+     * | src_swiz:6 */
+    out[0] = (XE_UCODE_FETCH_TEXTURE & 0x1F) |
+             ((src_reg & 0x3F) << 5) |
+             ((dst_reg & 0x3F) << 12) |
+             (1u << 19) |                  /* fetch_valid_only */
+             ((fetch_const & 0x1F) << 20) |
+             ((src_swiz & 0x3F) << 26);
+
+    /* dword1: dst_swiz:12 | mag_filter:2 | min_filter:2 | mip_filter:2 |
+     * aniso_filter:3 | arbitrary_filter:3 | vol_mag_filter:2 |
+     * vol_min_filter:2 | use_comp_lod:1 | use_reg_lod:1 | unk:1 |
+     * is_predicated:1.
+     * All filters = kUseFetchConst (3) so the sampler's fetch constant
+     * decides; aniso = kUseFetchConst (7); implicit LOD on. */
+    out[1] = (dst_swiz & 0xFFF) |
+             (3u << 12) | (3u << 14) | (3u << 16) |
+             (7u << 18) |
+             (3u << 24) | (3u << 26) |
+             (1u << 28) |                   /* use_comp_lod */
+             ((use_register_lod ? 1u : 0u) << 29);
+
+    /* dword2: use_reg_gradients:1 | sample_location:1 | lod_bias:7 |
+     * unused:5 | dimension:2 | offset_x:5 | offset_y:5 | offset_z:5 |
+     * pred_condition:1 */
+    out[2] = ((dimension & 0x3u) << 14);
+
+    return 3;
+}
+
 uint32_t xe_ucode_build_vs_minimal(uint32_t out[9])
 {
     uint32_t cf[2];

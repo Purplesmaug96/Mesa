@@ -39,6 +39,20 @@ struct xenos_vfetch_fixup
  * every vfetch's index from that GPR.  No ALU or fetch may touch GPR 62. */
 #define XE_VFETCH_INDEX_GPR_X  62u
 
+/* Texture fetch constant index = texture unit + this base.  The fetch
+ * constants are a shared 0x4800 register block (6 dwords per index); the
+ * vertex fetch constants fill the low blocks (one per attribute group of 3),
+ * so keep textures clear of them.  Both the FS tex codegen and the draw-time
+ * fetch-constant emission must use the same mapping. */
+#define XE_TEX_FETCH_INDEX_BASE 4u
+
+/* FS const register mapping.  xenia reads PS ucode constant N from register
+ * SHADER_CONSTANT_256 + N, so the guest must write the value for the FS
+ * ucode constant at reg 256 + (codegen_base + slot).  The compile-side base
+ * (xe_emit_uniform) and the draw-time upload base must stay in sync. */
+#define XE_FS_CONST_CODEGEN_BASE 32u
+#define XE_PS_CONST_REG_BASE     256u
+
 /* An opaque compiled Xenos shader: CF pair + vfetch/ALU slots + the metadata
  * the draw path needs (GPR counts, uniform/const count, interpolator
  * exports, vfetch fixups). */

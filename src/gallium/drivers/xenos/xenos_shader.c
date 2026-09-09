@@ -44,8 +44,6 @@
 #include "xenos_shader.h"
 #include "xenos_private.h"
 
-extern void DbgPrint(const char *fmt, ...);
-
 #define XE_MAX_UCODE_DWORDS 6144u /* 3 + 3*2047 slots */
 #define XE_MAX_SLOTS         ((XE_MAX_UCODE_DWORDS - 3) / 3)
 #define XE_HELPER_CONST_BASE 252u /* 0.0, 1.0, -1.0, 0.5 */
@@ -378,7 +376,6 @@ xe_emit_vs_vfetch(struct xe_cctx *c, nir_intrinsic_instr *intr)
    uint32_t attrib = nir_intrinsic_io_semantics(intr).location;
    uint32_t gpr = attrib; /* NIR location -> GPR (may have gaps) */
    unsigned ncomp = intr->def.num_components;
-   DbgPrint("[VFDPROBE] VSLOAD attrib=%u ncomp=%u", attrib, ncomp);
    if (gpr + 1 > c->max_gpr)
       c->max_gpr = gpr + 1;
    if (gpr >= c->next_temp_gpr)
@@ -418,6 +415,70 @@ xe_emit_fs_input(struct xe_cctx *c, nir_intrinsic_instr *intr)
                XE_UCODE_ALU_SWIZ_XYZW, false });
 }
 
+/* Texture sample: emit one tex fetch slot.  Supported ops: tex (implicit
+ * LOD), txl (register lod, bypassed via the fetch constant).  Coordinates
+ * must already live in a GPR (from an interpolated varying); the result is a
+ * full vec4 in a new temp GPR. */
+static void
+xe_emit_tex(struct xe_cctx *c, nir_tex_instr *tex)
+{
+   if (tex->op != nir_texop_tex && tex->op != nir_texop_txl) {
+      fprintf(stderr, "xenos: %s: unsupported texture op %u\n",
+              c->stage == MESA_SHADER_VERTEX ? "VS" : "FS",
+              (unsigned)tex->op);
+      c->failed = true;
+      return;
+   }
+
+   if (tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
+       tex->sampler_dim != GLSL_SAMPLER_DIM_RECT &&
+       tex->sampler_dim != GLSL_SAMPLER_DIM_EXTERNAL) {
+      fprintf(stderr, "xenos: %s: only 2D textures are supported\n",
+              c->stage == MESA_SHADER_VERTEX ? "VS" : "FS");
+      c->failed = true;
+      return;
+   }
+
+   int coord_src = -1;
+   for (int i = 0; i < tex->num_srcs; i++) {
+      if (tex->src[i].src_type == nir_tex_src_coord) {
+         coord_src = i;
+         break;
+      }
+   }
+   if (coord_src < 0) {
+      fprintf(stderr, "xenos: %s: texture has no coord source\n",
+              c->stage == MESA_SHADER_VERTEX ? "VS" : "FS");
+      c->failed = true;
+      return;
+   }
+
+   xe_ucode_alu_src coords =
+      xe_src_op(c, tex->src[coord_src].src, NULL, false, false);
+   if (!coords.is_temp) {
+      fprintf(stderr, "xenos: %s: texture coords must be a source GPR\n",
+              c->stage == MESA_SHADER_VERTEX ? "VS" : "FS");
+      c->failed = true;
+      return;
+   }
+
+   uint32_t dst = xe_alloc_temp(c);
+   uint32_t fc_index = tex->texture_index + XE_TEX_FETCH_INDEX_BASE;
+   uint32_t slot[3];
+   xe_ucode_tex(slot, dst, coords.reg, XE_UCODE_TEX_SWIZ_XY,
+                fc_index, XE_UCODE_DST_SWIZ_XYZW,
+                XE_UCODE_TEX_DIM_2D, tex->op == nir_texop_txl);
+   xe_emit_slot(c, slot, true);
+
+   uint32_t rswiz = XE_UCODE_ALU_SWIZ_XYZW;
+   if (tex->def.num_components == 1)
+      rswiz = xe_swiz_splat(0u);
+   else if (tex->def.num_components < 4)
+      rswiz = XE_UCODE_ALU_SWIZ_XYZW; /* consumers mask lanes via their own
+                                         swizzles over the full vec4 */
+   xe_def_set(c, &tex->def, (xe_ucode_alu_src){ true, dst, rswiz, false });
+}
+
 static void
 xe_emit_store_output(struct xe_cctx *c, nir_intrinsic_instr *intr)
 {
@@ -454,10 +515,12 @@ xe_emit_store_output(struct xe_cctx *c, nir_intrinsic_instr *intr)
 static void
 xe_emit_uniform(struct xe_cctx *c, nir_def *def, uint32_t const_idx)
 {
+   int fs_base = c->stage == MESA_SHADER_FRAGMENT ? XE_FS_CONST_CODEGEN_BASE : 0;
    if (const_idx >= XE_HELPER_CONST_BASE) {
       c->failed = true;
       return;
    }
+   const_idx += fs_base;
    if (const_idx + 1 > c->num_consts)
       c->num_consts = const_idx + 1;
    if (const_idx >= c->next_imm_const)
@@ -529,9 +592,6 @@ xe_emit_intrinsic(struct xe_cctx *c, nir_intrinsic_instr *intr)
 
    case nir_intrinsic_load_deref: {
       nir_variable *var = nir_intrinsic_get_var(intr, 0);
-      DbgPrint("[VFDPROBE] load_deref var=%p mode=%x loc=%u",
-               (void *)var, var ? var->data.mode : 0,
-               var ? var->data.driver_location : 0);
       if (var && (var->data.mode & nir_var_uniform)) {
          xe_emit_uniform(c, &intr->def, var->data.driver_location);
          return;
@@ -555,8 +615,6 @@ xe_emit_intrinsic(struct xe_cctx *c, nir_intrinsic_instr *intr)
    fprintf(stderr, "xenos: %s: unsupported intrinsic #%u\n",
            c->stage == MESA_SHADER_VERTEX ? "VS" : "FS",
            (unsigned)intr->intrinsic);
-   DbgPrint("[VFDPROBE] stage=%d UNSUPPORTED intrinsic #%u",
-            (int)c->stage, (unsigned)intr->intrinsic);
    c->failed = true;
 }
 
@@ -668,24 +726,18 @@ xe_compile_block(struct xe_cctx *c, nir_block *block)
    nir_foreach_instr (instr, block) {
       switch (instr->type) {
       case nir_instr_type_alu:
-         DbgPrint("[VFDPROBE] stage=%d ALU op=%s hw=%d",
-                  (int)c->stage,
-                  nir_op_infos[nir_instr_as_alu(instr)->op].name,
-                  (int)nir_instr_as_alu(instr)->op);
          xe_emit_alu_instr(c, nir_instr_as_alu(instr));
          break;
       case nir_instr_type_intrinsic:
-         DbgPrint("[VFDPROBE] stage=%d INTR %s",
-                  (int)c->stage,
-                  nir_intrinsic_infos[nir_instr_as_intrinsic(instr)->intrinsic].name);
          xe_emit_intrinsic(c, nir_instr_as_intrinsic(instr));
          break;
       case nir_instr_type_undef:
          xe_def_set(c, &nir_instr_as_undef(instr)->def, xe_op_zero);
          break;
+      case nir_instr_type_tex:
+         xe_emit_tex(c, nir_instr_as_tex(instr));
+         break;
       case nir_instr_type_phi:
-         DbgPrint("[VFDPROBE] stage=%d FAIL phi",
-                  (int)c->stage);
          fprintf(stderr, "xenos: %s: control flow not supported\n",
                  c->stage == MESA_SHADER_VERTEX ? "VS" : "FS");
          c->failed = true;
@@ -694,8 +746,6 @@ xe_compile_block(struct xe_cctx *c, nir_block *block)
          break; /* nop / jump / deref / parallel_copy: no code */
       }
       if (c->failed) {
-         DbgPrint("[VFDPROBE] stage=%d FAILED after instr type=%d",
-                  (int)c->stage, (int)instr->type);
          return;
       }
    }
@@ -811,20 +861,6 @@ free(c.defs);
       memcpy(shader->vfetch, c.vfetch,
              c.vfetch_count * sizeof(*c.vfetch));
       shader->vfetch_count = c.vfetch_count;
-      /* TEMP DIAGNOSTIC: dump emitted ucode dwords for the large (multi-block)
-       * vertex shader, via DbgPrint so it reaches the host log.  One-shot. */
-      {
-         static int dump_once = 1;
-         if (c.stage == MESA_SHADER_VERTEX && num_blocks >= 2 && dump_once) {
-            dump_once = 0;
-            DbgPrint("[EMITDT] VS slots=%u blocks=%u ucode_dwords=%u",
-                     (unsigned)c.num_slots, (unsigned)num_blocks,
-                     (unsigned)shader->ucode_dwords);
-            for (unsigned di = 0; di < (unsigned)shader->ucode_dwords; di++) {
-               DbgPrint("[EMITDT] %3u: %08x", di, shader->ucode[di]);
-            }
-         }
-      }
    }
 
    free(c.defs);
@@ -853,8 +889,6 @@ xenos_create_shader(struct pipe_screen *screen,
    NIR_PASS(_, nir, nir_opt_dce);
 
    struct xenos_shader *shader = xenos_compile(nir);
-   DbgPrint("[VFDPROBE] create_shader stage=%d irtype=%d -> shader=%p",
-            (int)nir->info.stage, (int)state->type, (void *)shader);
    if (shader) {
       fprintf(stderr, "xenos: compiled %s (%u inputs, %u outputs, %u slots, "
               "%u gprs, %u consts)\n",
@@ -872,11 +906,7 @@ xenos_compile_nir(struct nir_shader *nir)
    if (!nir || (nir->info.stage != MESA_SHADER_VERTEX &&
                 nir->info.stage != MESA_SHADER_FRAGMENT))
       return NULL;
-   DbgPrint("xenos: compile_nir stage=%d", (int)nir->info.stage);
-   struct xenos_shader *sh = xenos_compile(nir);
-   DbgPrint("xenos: compile_nir done sh=%p slots=%u fail=%d", sh,
-            sh ? sh->num_slots : 0, sh ? 0 : 1);
-   return sh;
+   return xenos_compile(nir);
 }
 
 void

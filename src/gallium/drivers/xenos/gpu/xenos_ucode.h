@@ -134,6 +134,26 @@ uint32_t xe_ucode_vfetch(uint32_t out[3], uint32_t fetch_const,
 /* ALU: 3 dwords. */
 uint32_t xe_ucode_alu_build(uint32_t out[3], const xe_ucode_alu *a);
 
+/* tex (TextureFetchInstruction: opcode = FetchOpcode::kTextureFetch = 1),
+ * 3 dwords.
+ *   fetch_const  : texture fetch constant index 0-31 (the 6-dword block at
+ *                  SHADER_CONSTANT_FETCH(fetch_const) written for the bound
+ *                  sampler, e.g. from texture unit + XE_TEX_FETCH_INDEX_BASE).
+ *   dst_reg/dst_swiz: result GPR + 12-bit destination swizzle (XYZW = 0x688).
+ *   src_reg/src_swiz: coordinate GPR + 6-bit source swizzle (XY = 8).
+ *   use_register_lod: take LOD from the W component instead of implicit.
+ * Filters default to kUseFetchConst so the fetch constant (sampler) decides;
+ * use_computed_lod (implicit LOD) is on. */
+#define XE_UCODE_FETCH_TEXTURE 1u /* FetchOpcode::kTextureFetch */
+#define XE_UCODE_TEX_SWIZ_XY   0x04u /* X=0, Y=1 (6-bit source swizzle) */
+#define XE_UCODE_TEX_DIM_2D    1u   /* FetchOpDimension::k2D */
+#define XE_UCODE_TEX_DIM_CUBE  3u   /* FetchOpDimension::kCube */
+
+uint32_t xe_ucode_tex(uint32_t out[3], uint32_t dst_reg,
+                      uint32_t src_reg, uint32_t src_swiz,
+                      uint32_t fetch_const, uint32_t dst_swiz,
+                      uint32_t dimension, bool use_register_lod);
+
 /* Minimal triangle VS (CF pair + vfetch_full + ALU export position), 9 dwords:
  *   CF pair = {NOP, exec_end} (3 dwords); vfetch const0 -> r0.xyzw
  *   (32_32_32_32_FLOAT, stride 4 dwords, vertex index from r0.x = the
