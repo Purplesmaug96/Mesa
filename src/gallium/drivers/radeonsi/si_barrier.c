@@ -8,6 +8,8 @@
 #include "si_query.h"
 #include "gfx/si_gfx.h"
 
+#include "ac_cmdbuf_cp.h"
+
 static struct si_resource *si_get_wait_mem_scratch_bo(struct si_context *ctx,
                                                       struct radeon_cmdbuf *cs, bool is_secure)
 {
@@ -219,13 +221,22 @@ static void gfx10_emit_barrier(struct si_context *ctx, struct radeon_cmdbuf *cs)
       gcr_cntl |= S_587_SEQ(V_587_SEQ_FORWARD);
 
       if (ctx->gfx_level >= GFX11) {
-         si_cp_release_mem_pws(ctx, cs, cb_db_event, gcr_cntl & C_587_GLI_INV);
+         ac_emit_cp_release_mem_pws(&cs->current, ctx->gfx_level,
+                                    ctx->is_gfx_queue ? AMD_IP_GFX : AMD_IP_COMPUTE,
+                                    cb_db_event, gcr_cntl & C_587_GLI_INV);
+
+         if (unlikely(ctx->sqtt_enabled))
+            si_sqtt_describe_barrier_start(ctx, cs);
 
          /* Wait for the event and invalidate remaining caches if needed. */
-         si_cp_acquire_mem_pws(ctx, cs, cb_db_event,
-                               flags & SI_BARRIER_PFP_SYNC_ME ? V_581B_CP_PFP : V_581B_CP_ME,
-                               gcr_cntl & ~C_587_GLI_INV, /* keep only GLI_INV */
-                               0, flags);
+         ac_emit_cp_acquire_mem_pws(&cs->current, ctx->gfx_level,
+                                    ctx->is_gfx_queue ? AMD_IP_GFX : AMD_IP_COMPUTE,
+                                    cb_db_event,
+                                    flags & SI_BARRIER_PFP_SYNC_ME ? V_581B_CP_PFP : V_581B_CP_ME,
+                                    0, gcr_cntl & ~C_587_GLI_INV /* keep only GLI_INV */);
+
+         if (unlikely(ctx->sqtt_enabled))
+            si_sqtt_describe_barrier_end(ctx, cs, flags);
 
          gcr_cntl = 0; /* all done */
          /* ACQUIRE_MEM in PFP is implemented as ACQUIRE_MEM in ME + PFP_SYNC_ME. */
@@ -255,20 +266,24 @@ static void gfx10_emit_barrier(struct si_context *ctx, struct radeon_cmdbuf *cs)
 
          gcr_cntl &= C_587_GLM_WB & C_587_GLM_INV & C_587_GL1_INV & C_587_GLV_INV & C_587_GL2_INV & C_587_GL2_WB; /* keep SEQ */
 
-         si_cp_release_mem(ctx, cs, cb_db_event,
-                           S_491_GLM_WB(glm_wb) | S_491_GLM_INV(glm_inv) |
-                           S_491_GL1_INV(gl1_inv) | S_491_GLV_INV(glv_inv) |
-                           S_491_GL2_INV(gl2_inv) | S_491_GL2_WB(gl2_wb) |
-                           S_491_SEQ(gcr_seq),
-                           EOP_DST_SEL_MEM, EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM,
-                           EOP_DATA_SEL_VALUE_32BIT, wait_mem_scratch, va, ctx->wait_mem_number,
-                           SI_NOT_QUERY);
+         const uint64_t eop_bug_va = si_get_eop_bug_va(ctx, wait_mem_scratch, SI_NOT_QUERY);
+
+         ac_emit_cp_release_mem(&cs->current, ctx->gfx_level,
+                                ctx->is_gfx_queue ? AMD_IP_GFX : AMD_IP_COMPUTE,
+                                cb_db_event,
+                                S_491_GLM_WB(glm_wb) | S_491_GLM_INV(glm_inv) |
+                                S_491_GL1_INV(gl1_inv) | S_491_GLV_INV(glv_inv) |
+                                S_491_GL2_INV(gl2_inv) | S_491_GL2_WB(gl2_wb) |
+                                S_491_SEQ(gcr_seq),
+                                EOP_DST_SEL_MEM, EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM,
+                                EOP_DATA_SEL_VALUE_32BIT, va, ctx->wait_mem_number,
+                                eop_bug_va);
 
          if (unlikely(ctx->sqtt_enabled)) {
             si_sqtt_describe_barrier_start(ctx, &ctx->gfx_cs);
          }
 
-         si_cp_wait_mem(ctx, cs, va, ctx->wait_mem_number, 0xffffffff, WAIT_REG_MEM_EQUAL);
+         ac_emit_cp_wait_mem(&cs->current, va, ctx->wait_mem_number, 0xffffffff, WAIT_REG_MEM_EQUAL);
 
          if (unlikely(ctx->sqtt_enabled)) {
             si_sqtt_describe_barrier_end(ctx, &ctx->gfx_cs, flags);
@@ -295,7 +310,7 @@ static void gfx10_emit_barrier(struct si_context *ctx, struct radeon_cmdbuf *cs)
       si_cp_acquire_mem(ctx, cs, gcr_cntl,
                         flags & SI_BARRIER_PFP_SYNC_ME ? V_581A_PREFETCH_PARSER : V_581A_MICRO_ENGINE);
    } else if (flags & SI_BARRIER_PFP_SYNC_ME) {
-      si_cp_pfp_sync_me(cs);
+      ac_emit_cp_pfp_sync_me(&cs->current, false);
    }
 
    /* Increase task wait count if not done before. */
@@ -338,9 +353,15 @@ static void gfx6_emit_barrier(struct si_context *sctx, struct radeon_cmdbuf *cs)
                           S_0085F0_CB7_DEST_BASE_ENA(1);
 
          /* Necessary for DCC */
-         if (sctx->gfx_level == GFX8)
-            si_cp_release_mem(sctx, cs, V_028A90_FLUSH_AND_INV_CB_DATA_TS, 0, EOP_DST_SEL_MEM,
-                              EOP_INT_SEL_NONE, EOP_DATA_SEL_DISCARD, NULL, 0, 0, SI_NOT_QUERY);
+         if (sctx->gfx_level == GFX8) {
+            const uint64_t eop_bug_va = si_get_eop_bug_va(sctx, NULL, SI_NOT_QUERY);
+
+            ac_emit_cp_release_mem(&cs->current, sctx->gfx_level,
+                                   sctx->is_gfx_queue ? AMD_IP_GFX : AMD_IP_COMPUTE,
+                                   V_028A90_FLUSH_AND_INV_CB_DATA_TS, 0,
+                                   EOP_DST_SEL_MEM, EOP_INT_SEL_NONE,
+                                   EOP_DATA_SEL_DISCARD, 0, 0, eop_bug_va);
+         }
       }
       if (flags & SI_BARRIER_SYNC_AND_INV_DB)
          cp_coher_cntl |= S_0085F0_DB_ACTION_ENA(1) | S_0085F0_DB_DEST_BASE_ENA(1);
@@ -432,15 +453,20 @@ static void gfx6_emit_barrier(struct si_context *sctx, struct radeon_cmdbuf *cs)
       va = wait_mem_scratch->gpu_address;
       sctx->wait_mem_number++;
 
-      si_cp_release_mem(sctx, cs, cb_db_event, tc_flags, EOP_DST_SEL_MEM,
-                        EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM, EOP_DATA_SEL_VALUE_32BIT,
-                        wait_mem_scratch, va, sctx->wait_mem_number, SI_NOT_QUERY);
+      const uint64_t eop_bug_va = si_get_eop_bug_va(sctx, wait_mem_scratch, SI_NOT_QUERY);
+
+      ac_emit_cp_release_mem(&cs->current, sctx->gfx_level,
+                             sctx->is_gfx_queue ? AMD_IP_GFX : AMD_IP_COMPUTE,
+                             cb_db_event, tc_flags, EOP_DST_SEL_MEM,
+                             EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM,
+                             EOP_DATA_SEL_VALUE_32BIT, va,
+                             sctx->wait_mem_number, eop_bug_va);
 
       if (unlikely(sctx->sqtt_enabled)) {
          si_sqtt_describe_barrier_start(sctx, cs);
       }
 
-      si_cp_wait_mem(sctx, cs, va, sctx->wait_mem_number, 0xffffffff, WAIT_REG_MEM_EQUAL);
+      ac_emit_cp_wait_mem(&cs->current, va, sctx->wait_mem_number, 0xffffffff, WAIT_REG_MEM_EQUAL);
 
       if (unlikely(sctx->sqtt_enabled)) {
          si_sqtt_describe_barrier_end(sctx, cs, flags);
@@ -502,7 +528,7 @@ static void gfx6_emit_barrier(struct si_context *sctx, struct radeon_cmdbuf *cs)
        * to an index buffer.
        */
       if (flags & SI_BARRIER_PFP_SYNC_ME)
-         si_cp_pfp_sync_me(cs);
+         ac_emit_cp_pfp_sync_me(&cs->current, false);
    }
 }
 

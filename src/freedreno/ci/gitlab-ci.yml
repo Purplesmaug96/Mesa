@@ -76,8 +76,16 @@ a530-gl:
     - .collabora-freedreno-rules
   variables:
     DEQP_SUITE: freedreno-a530
+    DEQP_FRACTION: 2
     FDO_CI_CONCURRENT: 3  # if 4, sometimes "deqp-gles31, not enough memory for the allocation" appears
-  parallel: 6
+  parallel: 4
+
+a530-gl-full:
+  extends:
+    - a530-gl
+    - .collabora-freedreno-manual-rules
+  variables:
+    DEQP_FRACTION: 1
 
 a530-traces:
   extends:
@@ -94,11 +102,19 @@ a530-piglit:
     - .lava-arm64-test-gl
     - .lava-dragonboard-820c:arm64
     - .test-piglit
-    - .collabora-freedreno-manual-rules
+    - .collabora-freedreno-rules
   parallel: 2
   variables:
     DEQP_SUITE: freedreno-a530-piglit
+    DEQP_FRACTION: 2
     HWCI_START_WESTON: 1
+
+a530-piglit-full:
+  extends:
+    - a530-piglit
+    - .collabora-freedreno-manual-rules
+  variables:
+    DEQP_FRACTION: 1
 
 a618-angle:
   extends:

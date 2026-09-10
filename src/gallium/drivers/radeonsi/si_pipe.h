@@ -1520,17 +1520,11 @@ void si_cp_copy_data(struct si_context *sctx, struct radeon_cmdbuf *cs, unsigned
 MESAPROC bool si_init_cp_reg_shadowing(struct si_context *sctx) TAILBT;
 
 /* si_cp_utils.c */
-void si_cp_release_mem_pws(struct si_context *sctx, struct radeon_cmdbuf *cs,
-                           unsigned event_type, unsigned gcr_cntl);
-void si_cp_acquire_mem_pws(struct si_context *sctx, struct radeon_cmdbuf *cs,
-                           unsigned event_type, unsigned stage_sel, unsigned gcr_cntl,
-                           unsigned distance, unsigned sqtt_flush_flags);
 void si_cp_release_acquire_mem_pws(struct si_context *sctx, struct radeon_cmdbuf *cs,
                                    unsigned event_type, unsigned gcr_cntl, unsigned stage_sel,
                                    unsigned sqtt_flush_flags);
 void si_cp_acquire_mem(struct si_context *sctx, struct radeon_cmdbuf *cs, unsigned gcr_cntl,
                        unsigned engine);
-void si_cp_pfp_sync_me(struct radeon_cmdbuf *cs);
 
 /* si_debug.c */
 void si_save_cs(struct radeon_winsys *ws, struct radeon_cmdbuf *cs, struct radeon_saved_cs *saved,
@@ -1550,13 +1544,13 @@ MESAPROC void si_gather_context_rolls(struct si_context *sctx) TAILV;
 MESAPROC void si_log_compute_state(struct si_context *sctx, struct u_log_context *log) TAILV;
 
 /* si_fence.c */
+uint64_t si_get_eop_bug_va(struct si_context *ctx, struct si_resource *buf,
+                           unsigned query_type);
 void si_cp_release_mem(struct si_context *ctx, struct radeon_cmdbuf *cs, unsigned event,
                        unsigned event_flags, unsigned dst_sel, unsigned int_sel, unsigned data_sel,
                        struct si_resource *buf, uint64_t va, uint32_t new_fence,
                        unsigned query_type);
 unsigned si_cp_write_fence_dwords(struct si_screen *screen);
-void si_cp_wait_mem(struct si_context *ctx, struct radeon_cmdbuf *cs, uint64_t va, uint32_t ref,
-                    uint32_t mask, unsigned flags);
 void si_init_fence_functions(struct si_context *ctx);
 void si_init_screen_fence_functions(struct si_screen *screen);
 struct pipe_fence_handle *si_create_fence(struct pipe_context *ctx,

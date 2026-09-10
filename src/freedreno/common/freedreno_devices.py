@@ -46,6 +46,7 @@ add_gpus([
         wave_granularity = 2,
         fibers_per_sp = 0, # TODO
         threadsize_base = 8,
+        reg_size_vec4 = 96, # TODO: confirm this
     ))
 
 add_gpus([
@@ -64,6 +65,7 @@ add_gpus([
         wave_granularity = 2,
         fibers_per_sp = 0, # TODO
         threadsize_base = 32, # TODO: Confirm this
+        reg_size_vec4 = 48, # not measured the way a5xx was
     ))
 
 add_gpus([
@@ -84,6 +86,7 @@ add_gpus([
         fibers_per_sp = 64 * 16, # Lowest number that didn't fault on spillall fs-varying-array-mat4-col-row-rd.
         highest_bank_bit = 14,
         threadsize_base = 32,
+        reg_size_vec4 = 64,
     ))
 
 add_gpus([
@@ -102,6 +105,7 @@ add_gpus([
         fibers_per_sp = 64 * 16, # Lowest number that didn't fault on spillall fs-varying-array-mat4-col-row-rd.
         highest_bank_bit = 14,
         threadsize_base = 32,
+        reg_size_vec4 = 64,
     ))
 
 add_gpus([
@@ -120,6 +124,7 @@ add_gpus([
         fibers_per_sp = 64 * 16, # Lowest number that didn't fault on spillall fs-varying-array-mat4-col-row-rd.
         highest_bank_bit = 15,
         threadsize_base = 32,
+        reg_size_vec4 = 64,
     ))
 
 # Props could be modified with env var:
@@ -839,6 +844,7 @@ a7xx_base = GPUProps(
 
         alias_mova_quirk = True,
         alias_predication_quirk = True,
+        prefetch_sam_helpers_quirk = True,
     )
 
 a7xx_gen1 = GPUProps(

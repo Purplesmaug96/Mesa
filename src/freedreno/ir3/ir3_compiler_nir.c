@@ -3478,6 +3478,12 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
 
       make_dst_dummy(sam);
       array_insert(ctx->block, ctx->block->keeps, sam);
+
+      if (ctx->so->type == MESA_SHADER_FRAGMENT &&
+          ir3_prefetch_sam_needs_helpers(ctx->compiler, sam)) {
+         ctx->so->need_pixlod = true;
+      }
+
       break;
    }
    case nir_intrinsic_prefetch_tex_ir3: {
@@ -5381,6 +5387,8 @@ setup_output(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       case VARYING_SLOT_CLIP_DIST1:
       case VARYING_SLOT_CLIP_VERTEX:
       case VARYING_SLOT_LAYER:
+      /* no hw edge flags, and gallium has no way to decline the output */
+      case VARYING_SLOT_EDGE:
          break;
       default:
          if (slot >= VARYING_SLOT_VAR0)
