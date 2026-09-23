@@ -44,6 +44,14 @@ xenos_xecore_free(void *ws, void *ptr)
 static uint64_t
 xenos_xecore_get_physical(void *ws, void *guest_va)
 {
+   /* MmGetPhysicalAddress returns wrong values for Mesa's allocations.
+    * Compute the physical address directly using the vE0000000 heap formula:
+    * P = (VA - 0xE0000000) + 0x1000  (for VA in [0xE0000000, 0xFFD00000))
+    * This is what PhysicalHeap::GetPhysicalAddress should return. */
+   uint32_t va = (uint32_t)(uintptr_t)guest_va;
+   if (va >= 0xE0000000u && va < 0xFFD00000u) {
+      return (uint64_t)((va - 0xE0000000u) + 0x1000u);
+   }
    return MmGetPhysicalAddress(guest_va);
 }
 

@@ -264,8 +264,10 @@ static void xe_triangle_state(xenos_cmdbuf *cb)
 
     /* Fragment color write + opaque alpha. */
     xe_gpu_cmd_reg_write(cb, XE_REG_RB_COLOR_MASK, 0xFu);
-    /* No blending: src=kOne, dest=kZero, add. */
-    xe_gpu_cmd_reg_write(cb, XE_REG_RB_BLENDCONTROL0, 0x00010001u);
+    /* No blending: src=kOne, dest=kZero, add.  Xenia bitfield:
+     * [4:0]=1(One) [7:5]=1(ADD) [12:8]=0(Zero)
+     * [20:16]=1(One) [23:21]=1(ADD) [28:24]=0(Zero) = 0x00210021 */
+    xe_gpu_cmd_reg_write(cb, XE_REG_RB_BLENDCONTROL0, 0x00210021u);
     /* Rasterization: no cull, filled triangles, poly mode disabled. */
     xe_gpu_cmd_reg_write(cb, XE_REG_PA_SU_SC_MODE_CNTL, 0u);
     /* Clip enabled: positions are NDC, transformed by PA_CL_VPORT below
@@ -319,7 +321,8 @@ static void xe_triangle_fetch_constant(xenos_cmdbuf *cb)
     xenos_vertex_fetch vf[3];
     memset(vf, 0, sizeof(vf));
     xe_gpu_vfetch_build(&vf[0], s_triangle_vb_phys, 48u, XE_ENDIAN_8IN32);
-    xe_gpu_cmd_reg_writen(cb, XE_REG_SHADER_CONST_FETCH(0), 6,
+    /* Only write VF0 (2 dwords) to avoid clobbering VF1/VF2. */
+    xe_gpu_cmd_reg_writen(cb, 0x4800, 2,
                           (const uint32_t *)&vf[0]);
 }
 
@@ -785,7 +788,8 @@ static void xe_resolve_submit(xenos_cmdbuf *cb)
     /* vf0 = resolve rectangle (3 x (x,y) floats). */
     memset(vf, 0, sizeof(vf));
     xe_gpu_vfetch_build(&vf[0], s_resolve_rect_phys, 24u, XE_ENDIAN_8IN32);
-    xe_gpu_cmd_reg_writen(cb, XE_REG_SHADER_CONST_FETCH(0), 6,
+    /* Only write VF0 (2 dwords) to avoid clobbering VF1/VF2. */
+    xe_gpu_cmd_reg_writen(cb, 0x4800, 2,
                           (const uint32_t *)&vf[0]);
 
     DbgPrint("xenos: resolve submit draw, initiator=%08x", initiator);

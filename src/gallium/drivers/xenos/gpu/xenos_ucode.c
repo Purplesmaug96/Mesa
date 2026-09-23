@@ -223,3 +223,111 @@ uint32_t xe_ucode_build_ps_minimal(uint32_t out[6])
 
     return 6;
 }
+
+uint32_t xe_ucode_build_vs_blit(uint32_t out[18])
+{
+    uint32_t cf[2];
+
+    /* CF pair: {NOP, exec}.  exec address = 1, count = 4, sequence = 0b0101:
+     * slot0 = fetch (bit0), slot1 = fetch (bit2), slot2/3 = ALU. */
+    xe_ucode_cf_exec(cf, 1, 4, 0b0101, XE_UCODE_CF_EXEC_END);
+    xe_ucode_cf_emit_pair(out, 0, 0, cf[0], cf[1]);
+
+    /* slot0: uv const1 -> r1.xyzw.  Index from r0.x (auto-injected, still
+     * intact here because the position fetch that clobbers r0 comes next). */
+    xe_ucode_vfetch(&out[3], 1, 1, XE_UCODE_DST_SWIZ_XYZW,
+                    0, 0 /* r0.x */,
+                    XE_UCODE_FORMAT_32_32_32_32_FLOAT,
+                    8 /* dword stride */, 4 /* dword offset (16 bytes) */,
+                    true, true);
+
+    /* slot1: position const0 -> r0.xyzw. */
+    xe_ucode_vfetch(&out[6], 0, 0, XE_UCODE_DST_SWIZ_XYZW,
+                    0, 0 /* r0.x */,
+                    XE_UCODE_FORMAT_32_32_32_32_FLOAT,
+                    8 /* dword stride */, 0, true, true);
+
+    /* slot2: max r0.xyzw, r0, r0 -> kVSPosition (62). */
+    xe_ucode_alu alu;
+    alu.opc = XE_UCODE_ALU_MAX;
+    alu.write_mask = 0xF;
+    alu.dst = 0;
+    alu.export_ = true;
+    alu.export_dest = XE_UCODE_EXP_VS_POSITION;
+    alu.src[0].is_temp = true;
+    alu.src[0].reg = 0;
+    alu.src[0].swiz = XE_UCODE_ALU_SWIZ_XYZW;
+    alu.src[0].negate = false;
+    alu.src[1].is_temp = true;
+    alu.src[1].reg = 0;
+    alu.src[1].swiz = XE_UCODE_ALU_SWIZ_XYZW;
+    alu.src[1].negate = false;
+    alu.src[2].is_temp = false;
+    alu.src[2].reg = 0;
+    alu.src[2].swiz = 0;
+    alu.src[2].negate = false;
+    alu.scalar_opc = XE_UCODE_SCALAR_NOP;
+    alu.scalar_mask = 0;
+    alu.scalar_dst = 0;
+    alu.vector_clamp = false;
+    alu.scalar_clamp = false;
+    alu.abs_constants = false;
+    xe_ucode_alu_build(&out[9], &alu);
+
+    /* slot3: max r1.xyzw, r1, r1 -> kVSInterpolator0 (0). */
+    alu.dst = 1;
+    alu.export_ = true;
+    alu.export_dest = XE_UCODE_EXP_VS_INTERP(0);
+    alu.src[0].is_temp = true;
+    alu.src[0].reg = 1;
+    alu.src[1].is_temp = true;
+    alu.src[1].reg = 1;
+    xe_ucode_alu_build(&out[12], &alu);
+
+    return 18;
+}
+
+uint32_t xe_ucode_build_ps_blit(uint32_t out[9])
+{
+    uint32_t cf[2];
+    xe_ucode_alu alu;
+
+    /* CF pair: {NOP, exec_end}, address 1, 2 slots, sequence = 0b01:
+     * slot0 = texture fetch (bit0), slot1 = ALU. */
+    xe_ucode_cf_exec(cf, 1, 2, 0b01, XE_UCODE_CF_EXEC_END);
+    xe_ucode_cf_emit_pair(out, 0, 0, cf[0], cf[1]);
+
+    /* slot0: tex fetch const XE_BLIT_TEX_FETCH_INDEX, coords from GPR0
+     * (interpolator0 = uv), result -> r1.xyzw, 2D. */
+    xe_ucode_tex(&out[3], 1, 0, XE_UCODE_TEX_SWIZ_XY,
+                 XE_BLIT_TEX_FETCH_INDEX, XE_UCODE_DST_SWIZ_XYZW,
+                 XE_UCODE_TEX_DIM_2D, false);
+
+    /* slot1: max r1.xyzw, r1, r1 -> kPSColor0 (0). */
+    alu.opc = XE_UCODE_ALU_MAX;
+    alu.write_mask = 0xF;
+    alu.dst = 1;
+    alu.export_ = true;
+    alu.export_dest = XE_UCODE_EXP_PS_COLOR0;
+    alu.src[0].is_temp = true;
+    alu.src[0].reg = 1;
+    alu.src[0].swiz = XE_UCODE_ALU_SWIZ_XYZW;
+    alu.src[0].negate = false;
+    alu.src[1].is_temp = true;
+    alu.src[1].reg = 1;
+    alu.src[1].swiz = XE_UCODE_ALU_SWIZ_XYZW;
+    alu.src[1].negate = false;
+    alu.src[2].is_temp = false;
+    alu.src[2].reg = 0;
+    alu.src[2].swiz = 0;
+    alu.src[2].negate = false;
+    alu.scalar_opc = XE_UCODE_SCALAR_NOP;
+    alu.scalar_mask = 0;
+    alu.scalar_dst = 0;
+    alu.vector_clamp = false;
+    alu.scalar_clamp = false;
+    alu.abs_constants = false;
+    xe_ucode_alu_build(&out[6], &alu);
+
+    return 9;
+}

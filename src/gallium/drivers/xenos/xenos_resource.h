@@ -23,12 +23,13 @@ struct xenos_resource
    void *data;          /* CPU (guest) virtual address */
    uint32_t gpu_addr;   /* guest physical address >> 2, as used in PM4
                            fetch constants and packets */
-   unsigned size;       /* bytes allocated */
-   unsigned stride;     /* bytes per row of level 0 */
+   uint32_t size;       /* bytes allocated */
+   uint32_t stride;     /* bytes per row of level 0 */
 
    /* Render targets additionally own an EDRAM tile range (the actual GPU
     * drawing surface) and a tiled system-memory resolve backing. */
    uint32_t has_edram;        /* render target with EDRAM backing */
+   uint32_t rendered;         /* drawn/cleared as a target since last upload */
    uint32_t edram_base;       /* first tile index */
    uint32_t edram_pitch_tiles;
    uint32_t edram_rows;
@@ -41,6 +42,15 @@ xenos_resource(struct pipe_resource *res)
 {
    return (struct xenos_resource *)res;
 }
+
+struct xenos_screen;
+
+/* Lazily give a texture EDRAM tiles + tiled resolve backing when it is bound
+ * as a render target.  Harmless no-op if the resource already has EDRAM (or
+ * is a buffer). */
+void xenos_resource_assign_edram(struct xenos_screen *xs,
+                                 struct xenos_resource *res,
+                                 unsigned bind);
 
 void xenos_init_screen_resource_funcs(struct pipe_screen *screen);
 

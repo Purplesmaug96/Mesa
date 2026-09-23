@@ -20,8 +20,27 @@
 #define XE_ENDIAN_8IN32   2u
 #define XE_ENDIAN_16IN32  3u
 
-/* TextureFormat::k_8_8_8_8 (xenos.h). */
-#define XE_TFETCH_FORMAT_8_8_8_8 6u
+/* TextureFormat values from xenos.h used in fetch constants. */
+#define XE_TFETCH_FORMAT_8_8_8_8       6u
+#define XE_TFETCH_FORMAT_8_8_8_8_A     14u
+#define XE_TFETCH_FORMAT_4_4_4_4       15u
+#define XE_TFETCH_FORMAT_10_11_11      16u
+#define XE_TFETCH_FORMAT_11_11_10      17u
+#define XE_TFETCH_FORMAT_DXT1          18u
+#define XE_TFETCH_FORMAT_DXT2_3        19u
+#define XE_TFETCH_FORMAT_DXT4_5        20u
+#define XE_TFETCH_FORMAT_16_16         25u
+#define XE_TFETCH_FORMAT_16_16_16_16   26u
+#define XE_TFETCH_FORMAT_16_FLOAT      30u
+#define XE_TFETCH_FORMAT_16_16_FLOAT   31u
+#define XE_TFETCH_FORMAT_16_16_16_16_FLOAT 32u
+#define XE_TFETCH_FORMAT_32_FLOAT      36u
+#define XE_TFETCH_FORMAT_32_32_FLOAT   37u
+#define XE_TFETCH_FORMAT_32_32_32_32_FLOAT 38u
+#define XE_TFETCH_FORMAT_DXN           49u
+#define XE_TFETCH_FORMAT_32_32_32_FLOAT 57u
+#define XE_TFETCH_FORMAT_DXT3A         58u
+#define XE_TFETCH_FORMAT_DXT5A         59u
 /* DataDimension::k2DOrStacked stored in the fetch constant. */
 #define XE_TFETCH_DIMENSION_2D   1u
 /* TextureFilter: kPoint=0, kLinear=1, kUseFetchConst=3. */
@@ -75,7 +94,7 @@ xe_gpu_tfetch_build(uint32_t dw[6], uint32_t guest_phys,
                     uint32_t width, uint32_t height,
                     uint32_t mag_filter, uint32_t min_filter,
                     uint32_t mip_filter, uint32_t clamp,
-                    uint32_t swizzle)
+                    uint32_t swizzle, uint32_t tiled)
 {
     uint32_t pitch_px = xe_gpu_tfetch_pitch_word(width);
     uint32_t wx = width ? (width - 1u) : 0u;
@@ -86,7 +105,8 @@ xe_gpu_tfetch_build(uint32_t dw[6], uint32_t guest_phys,
             ((clamp & 0x7u) << 10) |
             ((clamp & 0x7u) << 13) |
             ((clamp & 0x7u) << 16) |
-            (((pitch_px >> 5) & 0x1FFu) << 22);
+            (((pitch_px >> 5) & 0x1FFu) << 22) |
+            ((tiled & 0x1u) << 31);
     /* dword1: format:6 | endian:2 | request_size:2 | stacked:1 |
      * nearest_clamp_policy:1 | base_address:20 (guest_phys >> 12) */
     dw[1] = (XE_TFETCH_FORMAT_8_8_8_8 & 0x3Fu) |

@@ -168,4 +168,28 @@ uint32_t xe_ucode_build_vs_minimal(uint32_t out[9]);
  * Returns the number of dwords written (6). */
 uint32_t xe_ucode_build_ps_minimal(uint32_t out[6]);
 
+/* Texture-sampling blit VS, 18 dwords:
+ *   slot0: mov r62.x, r0.x               (save auto-injected vertex index)
+ *   slot1: vfetch const0 -> r0.xyzw      (position, 4x float32)
+ *   slot2: vfetch const1 -> r1.xyzw      (uv, 4x float32)
+ *   slot3: max r0.xyzw,r0,r0; export kVSPosition (62)
+ *   slot4: max r1.xyzw,r1,r1; export kVSInterpolator0 (0)
+ * Vertex stride is 8 dwords (32 bytes): {x,y,z,w, u,v,0,1}.  Both fetches read
+ * from the same vertex buffer; const0 = offset 0, const1 = offset 4 dwords.
+ * Returns the number of dwords written (18). */
+uint32_t xe_ucode_build_vs_blit(uint32_t out[18]);
+
+/* Texture-sampling blit PS, 9 dwords:
+ *   slot0: tex fetch_const (unit 0 -> XE_TEX_FETCH_INDEX_BASE), coords from
+ *          interpolated uv in GPR0 (XY), result -> r1.xyzw
+ *   slot1: max r1.xyzw,r1,r1; export kPSColor0 (0).
+ * Returns the number of dwords written (9). */
+uint32_t xe_ucode_build_ps_blit(uint32_t out[9]);
+
+/* Texture fetch-constant block index the blit PS samples (30 is past the
+ * game's texture units at 4.. and the vertex fetch const blocks 0..3, so the
+ * blit's tfetch can never collide).  Must match the register block the blit
+ * writes with xe_gpu_tfetch_build. */
+#define XE_BLIT_TEX_FETCH_INDEX   30u
+
 #endif /* XENOS_UCODE_H */

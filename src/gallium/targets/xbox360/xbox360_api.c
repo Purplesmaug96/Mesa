@@ -61,6 +61,7 @@ struct xbox360_display
    /* Results of the last present(). */
    struct pipe_transfer *present;
    void *mapped;
+   uint32_t present_counter;
 };
 
 static struct xbox360_display *
@@ -289,8 +290,11 @@ xbox360_present(struct xbox360_display *d, struct xbox360_frame *frame)
       if (xenos_flush_frame(pipe, d->color, &info)) {
          frame->gpu_tiled = true;
          frame->gpu_phys = info.phys;
+         DbgPrint("xbox360: present GPU-tiled phys=0x%08x w=%u h=%u tiled=%u",
+                  info.phys, info.width, info.height, info.tiled);
          return;
       }
+      DbgPrint("xbox360: xenos_flush_frame FAILED (falling back to CPU)\n");
    }
 
    /* Softpipe fallback: map and expose the CPU pixels. */
@@ -307,6 +311,27 @@ xbox360_present(struct xbox360_display *d, struct xbox360_frame *frame)
                                  &box, &d->present);
    if (!d->mapped)
       return;
+
+   /* Periodic sanity check of the CPU buffer: report mean and the number of
+    * non-black pixels so we can tell whether the presented image has real
+    * content or is just the black clear. */
+   if ((d->present_counter++ % 60) == 0) {
+      const uint32_t *p = (const uint32_t *)d->mapped;
+      unsigned nonblack = 0;
+      uint64_t sum = 0;
+      unsigned stride_dw = d->present->stride / 4;
+      for (unsigned y = 0; y < d->height; y += 4) {
+         for (unsigned x = 0; x < d->width; x += 4) {
+            uint32_t c = p[y * stride_dw + x];
+            sum += (c & 0xFFu) + ((c >> 8) & 0xFFu) + ((c >> 16) & 0xFFu);
+            if ((c & 0xFFFFFFu) != 0)
+               nonblack++;
+         }
+      }
+      DbgPrint("xbox360: CPU present %ux%u mean=%llu nonblack=%u first12=%08x %08x %08x %08x\n",
+               d->width, d->height, (unsigned long long)(sum / (d->width * d->height)),
+               nonblack, p[0], p[1], p[2], p[3]);
+   }
 
    frame->ptr = d->mapped;
    frame->stride = d->present->stride;

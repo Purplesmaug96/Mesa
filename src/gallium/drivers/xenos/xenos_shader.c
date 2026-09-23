@@ -294,13 +294,14 @@ static void
 xe_vfetch(struct xe_cctx *c, uint32_t attrib, uint32_t dst_gpr)
 {
    uint32_t slot[3];
-   /* Format/stride/offset are patched at draw time; use 4x float32 + zero
-    * stride here.  Index source is the reserved r62.x copy of the vertex
+   /* Format/stride/offset are patched at draw time; use 4x float32 + stride 1
+    * (non-zero to avoid Xenia shader translator assert on stride=0).
+    * Index source is the reserved r62.x copy of the vertex
     * index, NOT r0 (whose value the position fetch below will overwrite). */
    xe_emit_vindex_save(c);
    xe_ucode_vfetch(slot, attrib, dst_gpr, XE_UCODE_DST_SWIZ_XYZW,
                    XE_VFETCH_INDEX_GPR_X, 0 /* r62.x = saved vertex index */,
-                   XE_UCODE_FORMAT_32_32_32_32_FLOAT, 0, 0, true, true);
+                   XE_UCODE_FORMAT_32_32_32_32_FLOAT, 1, 0, true, true);
     uint32_t slot_idx = c->num_slots;
     if (c->vfetch_count < 16) {
        c->vfetch[c->vfetch_count].ucode_dword = 3 + 3 * slot_idx;
@@ -426,6 +427,7 @@ xe_emit_tex(struct xe_cctx *c, nir_tex_instr *tex)
       fprintf(stderr, "xenos: %s: unsupported texture op %u\n",
               c->stage == MESA_SHADER_VERTEX ? "VS" : "FS",
               (unsigned)tex->op);
+      DbgPrint("xenos: [FAIL] tex op %u not tex/txl stage=%u", (unsigned)tex->op, c->stage);
       c->failed = true;
       return;
    }
@@ -435,6 +437,7 @@ xe_emit_tex(struct xe_cctx *c, nir_tex_instr *tex)
        tex->sampler_dim != GLSL_SAMPLER_DIM_EXTERNAL) {
       fprintf(stderr, "xenos: %s: only 2D textures are supported\n",
               c->stage == MESA_SHADER_VERTEX ? "VS" : "FS");
+      DbgPrint("xenos: [FAIL] tex dim=%u not 2D stage=%u", (unsigned)tex->sampler_dim, c->stage);
       c->failed = true;
       return;
    }
@@ -449,6 +452,7 @@ xe_emit_tex(struct xe_cctx *c, nir_tex_instr *tex)
    if (coord_src < 0) {
       fprintf(stderr, "xenos: %s: texture has no coord source\n",
               c->stage == MESA_SHADER_VERTEX ? "VS" : "FS");
+      DbgPrint("xenos: [FAIL] tex no coord source stage=%u", c->stage);
       c->failed = true;
       return;
    }
@@ -615,6 +619,8 @@ xe_emit_intrinsic(struct xe_cctx *c, nir_intrinsic_instr *intr)
    fprintf(stderr, "xenos: %s: unsupported intrinsic #%u\n",
            c->stage == MESA_SHADER_VERTEX ? "VS" : "FS",
            (unsigned)intr->intrinsic);
+   DbgPrint("xenos: [FAIL] intrinsic #%u stage=%u",
+            (unsigned)intr->intrinsic, c->stage);
    c->failed = true;
 }
 
@@ -699,6 +705,8 @@ xe_emit_alu_instr(struct xe_cctx *c, nir_alu_instr *alu)
       fprintf(stderr, "xenos: %s: unsupported ALU op %s\n",
               c->stage == MESA_SHADER_VERTEX ? "VS" : "FS",
               nir_op_infos[alu->op].name);
+      DbgPrint("xenos: [FAIL] ALU op %s stage=%u",
+               nir_op_infos[alu->op].name, c->stage);
       c->failed = true;
       return;
    }
@@ -740,6 +748,7 @@ xe_compile_block(struct xe_cctx *c, nir_block *block)
       case nir_instr_type_phi:
          fprintf(stderr, "xenos: %s: control flow not supported\n",
                  c->stage == MESA_SHADER_VERTEX ? "VS" : "FS");
+         DbgPrint("xenos: [FAIL] phi/control flow stage=%u", c->stage);
          c->failed = true;
          break;
       default:
@@ -865,12 +874,22 @@ free(c.defs);
 
    free(c.defs);
 
-   if (!shader)
+   if (!shader) {
       fprintf(stderr, "xenos: %s shader compile FAILED\n",
               c.stage == MESA_SHADER_VERTEX ? "VS" : "FS");
+      DbgPrint("[SHADER] %s compile FAILED inputs=%08x outputs=%08x",
+               c.stage == MESA_SHADER_VERTEX ? "VS" : "FS",
+               (unsigned)nir->info.inputs_read,
+               (unsigned)nir->info.outputs_written);
+   }
 
    return shader;
 }
+
+/* DIAGNOSTIC: when >0, force the next N FS compiles to output solid red.
+ * This tests whether the rendering pipeline works at all.  Set to 0 to
+ * restore normal behaviour. */
+static int s_force_red_fs = 0;
 
 struct xenos_shader *
 xenos_create_shader(struct pipe_screen *screen,
@@ -888,13 +907,80 @@ xenos_create_shader(struct pipe_screen *screen,
    NIR_PASS(_, nir, nir_opt_deref);
    NIR_PASS(_, nir, nir_opt_dce);
 
+   DbgPrint("CREATE-SHADER-BEFORE stage=%d",
+            nir ? (int)nir->info.stage : -1);
+
    struct xenos_shader *shader = xenos_compile(nir);
+
+   /* --- DIAG: force red FS output --- */
+   if (shader && shader->type == MESA_SHADER_FRAGMENT && s_force_red_fs > 0) {
+      s_force_red_fs--;
+      DbgPrint("[RED-FS] Forcing FS #%d to solid red output",
+               1 - s_force_red_fs);
+      /* Replace the compiled ucode with a minimal PS that exports red:
+       *   max c48.xyzw, c48, c48;  export to PS_COLOR0.
+       * c48 = constant index 48 in the ALU.  The upload function adds
+       * XE_FS_CONST_CODEGEN_BASE (32) to the index, so we store the
+       * value at const_values[16] (16+32=48). */
+      free(shader->ucode);
+      free(shader->const_values);
+      uint32_t uc[9];
+      uint32_t n = xe_ucode_build_ps_minimal(uc);
+      shader->ucode = malloc(n * sizeof(uint32_t));
+      memcpy(shader->ucode, uc, n * sizeof(uint32_t));
+      shader->ucode_dwords = n;
+      shader->num_slots = 1;
+      shader->num_gprs = 1;
+      shader->num_inputs = 0;
+      shader->num_outputs = 1;
+      /* constant index 16 (upload adds base 32 → register 48) = red */
+      shader->num_consts = 17;  /* indices 0..16 */
+      shader->num_ubos = 0;
+      shader->const_values = calloc(17 * 4, sizeof(float));
+      if (shader->const_values) {
+         float *c = &shader->const_values[16 * 4];
+         c[0] = 1.0f;  /* R */
+         c[1] = 0.0f;  /* G */
+         c[2] = 0.0f;  /* B */
+         c[3] = 1.0f;  /* A */
+      }
+      shader->varying_mask = 0;
+      shader->vfetch_count = 0;
+      return shader;
+   }
    if (shader) {
       fprintf(stderr, "xenos: compiled %s (%u inputs, %u outputs, %u slots, "
               "%u gprs, %u consts)\n",
               shader->type == MESA_SHADER_VERTEX ? "VS" : "FS",
               shader->num_inputs, shader->num_outputs, shader->num_slots,
               shader->num_gprs, shader->num_consts);
+      DbgPrint("[SHADER] compiled %s in=%u out=%u slots=%u gprs=%u consts=%u "
+               "ubos=%u vf=%u",
+               shader->type == MESA_SHADER_VERTEX ? "VS" : "FS",
+               shader->num_inputs, shader->num_outputs, shader->num_slots,
+               shader->num_gprs, shader->num_consts, shader->num_ubos,
+               shader->vfetch_count);
+      if (shader->type == MESA_SHADER_VERTEX) {
+         static int s_ucode_dump = 0;
+         if (s_ucode_dump++ < 4) {
+            uint32_t n = MIN2(shader->ucode_dwords, 48u);
+            for (uint32_t i = 0; i < n; i += 4)
+               DbgPrint("[VSUC] %02u %08x %08x %08x %08x", i,
+                        shader->ucode[i + 0], shader->ucode[i + 1],
+                        shader->ucode[i + 2], shader->ucode[i + 3]);
+         }
+      } else {
+         static int s_fsucode_dump = 0;
+         if (s_fsucode_dump++ < 4) {
+            uint32_t n = MIN2(shader->ucode_dwords, 48u);
+            DbgPrint("[FSUC] slots=%u seq=%08x", shader->num_slots,
+                     shader->ucode[1]);
+            for (uint32_t i = 0; i < n; i += 4)
+               DbgPrint("[FSUC] %02u %08x %08x %08x %08x", i,
+                        shader->ucode[i + 0], shader->ucode[i + 1],
+                        shader->ucode[i + 2], shader->ucode[i + 3]);
+         }
+      }
    }
 
    return shader;
