@@ -402,9 +402,6 @@ xenos_create_fs_state(struct pipe_context *pipe,
    return xenos_create_shader(pipe->screen, state);
 }
 
-/* FS alpha fix flag - set to 1 after patching. */
-static int s_alpha_patched = 0;
-
 static void
 xenos_bind_fs_state(struct pipe_context *pipe, void *cso)
 {
@@ -415,93 +412,6 @@ xenos_bind_fs_state(struct pipe_context *pipe, void *cso)
                (uint32_t)(uintptr_t)cso,
                s ? (uint32_t)(uintptr_t)s->ucode : 0,
                s ? s->ucode_dwords : 0);
-   }
-
-   /* --- FS ALPHA FIX: patch FS MAX+EXPORT to force alpha=1.0 ---
-    *
-    * Root cause: VS exports varyings with vec3 write_mask -> W defaults to 0.
-    * FS does texel*r1 -> alpha=0 -> blend produces black.
-    *
-    * Strategy: Two patches per MAX+EXPORT ALU slot:
-    * 1) uc[p+2] (dword2/struct C): change src2 from temp to const 200
-    *    so scalar_opc can use src1.W as a source.
-    * 2) uc[p] (dword0/struct A): change vector_write_mask from 0xF to 0x7
-    *    so W comes from the scalar operation (not vector), and set
-    *    scalar_opc to ADDS so W = src0.W + src1.W = 0 + 1.0 = 1.0.
-    *
-    * AluInstruction layout (3 dwords, 12 bytes):
-    *   dword0 (struct A): vector_dest[5:0], export_data[15],
-    *     vector_write_mask[19:16], scalar_write_mask[23:20],
-    *     scalar_opc[31:26]
-    *   dword1 (struct B): src swizzles, negate flags
-    *   dword2 (struct C): src3_reg[7:0], src2_reg[15:8], src1_reg[23:16],
-    *     vector_opc[28:24], src3_sel[29], src2_sel[30], src1_sel[31] */
-   if (cso) {
-      struct xenos_shader *s = (struct xenos_shader *)cso;
-      if (s->type == MESA_SHADER_FRAGMENT && s->ucode_dwords >= 6) {
-         static int s_fs_dump = 0;
-         if (s_fs_dump < 10) {
-            DbgPrint("FS-DUMP: dwords=%u", s->ucode_dwords);
-            for (uint32_t j = 0; j < s->ucode_dwords; j++)
-               DbgPrint("FS-DUMP: uc[%u]=%08x", j, s->ucode[j]);
-            s_fs_dump++;
-         }
-         /* CF preamble is 3 dwords; ALU slots follow at dword 3,6,9,... */
-         int patched_any = 0;
-         for (uint32_t p = 3; p + 2 < s->ucode_dwords; p += 3) {
-            uint32_t d0 = s->ucode[p];     /* struct A: export_data at bit 15 */
-            uint32_t d2 = s->ucode[p + 2]; /* struct C: vector_opc at bits[28:24] */
-            uint32_t opc = (d2 >> 24) & 0x1F;
-            uint32_t export = (d0 >> 15) & 1;
-            {
-               static int s_slot_log = 0;
-               if (s_slot_log < 30) {
-                  DbgPrint("FS-SLOT: p=%u opc=%u export=%u d0=%08x d2=%08x vw=%u sw=%u",
-                           p, opc, export, d0, d2, (d0>>16)&0xF, (d0>>20)&0xF);
-                  s_slot_log++;
-               }
-            }
-            if (opc == 2 /* MAX */ && export) {
-               /* PATCH v6: Force alpha=1.0 via constant-1 mechanism.
-                *
-                * Xenia ucode constant-1 rule (ucode.h GetConstant1WriteMask):
-                *   constant_1_mask = vector_write_mask & scalar_write_mask
-                *   For each bit in the overlap, the output is constant 1.0
-                *   (not from vector or scalar op).
-                *
-                * Mesa's compiler generates vw=0xF, sw=0x0 for exports.
-                * We set sw=0x8 (W bit only). The overlap is bit 3:
-                *   constant_1_mask = 0xF & 0x8 = 0x8
-                *   → W = constant 1.0
-                *   → XYZ come from the MAX vector op (unchanged)
-                *
-                * Xenia SPIR-V translator handles this correctly:
-                *   GetVectorOpResultWriteMask = vw & ~sw = 0x7 (XYZ)
-                *   components[3] = SwizzleSource::k1 (constant 1)
-                *   Shuffle: vec3(MAX.xyz) + const_float2(0,1) → index 4 = 1.0
-                *
-                * No scalar pipeline, no constant upload, no SQ_PS_CONST needed.
-                */
-               uint32_t new_d0 = d0;
-               /* Keep vector_write_mask at 0xF (all four from vector op).
-                * Set scalar_write_mask to 0x8 (W bit only).
-                * Overlap on W triggers constant 1.0. */
-               new_d0 &= ~(0xFu << 20);  /* Clear scalar_write_mask */
-               new_d0 |= (0x8u << 20);   /* Set W bit */
-               s->ucode[p] = new_d0;
-               patched_any = 1;
-               static int s_patch_count = 0;
-               if (s_patch_count < 20) {
-                  DbgPrint("FS-ALPHA-v6: slot[%u] d0=%08x->%08x vw=%u sw=%u",
-                           p, d0, new_d0,
-                           (new_d0 >> 16) & 0xF, (new_d0 >> 20) & 0xF);
-                  s_patch_count++;
-               }
-            }
-         }
-         if (patched_any)
-            s_alpha_patched = 1;
-      }
    }
 
    xenos_context(pipe)->fs = cso;
@@ -523,13 +433,15 @@ xenos_create_vs_state(struct pipe_context *pipe,
 static void
 xenos_bind_vs_state(struct pipe_context *pipe, void *cso)
 {
-   static int s_bind_log = 0;
-   if (s_bind_log++ < 10) {
+   static const void *s_last_vs = (const void *)-1;
+   if (cso != s_last_vs) {
       struct xenos_shader *s = cso ? (struct xenos_shader *)cso : NULL;
-      DbgPrint("xenos: BIND_VS cso=%08x ucode=%08x dwords=%u\n",
+      s_last_vs = cso;
+      DbgPrint("xenos: BIND_VS cso=%08x ucode=%08x dwords=%u vf=%u",
                (uint32_t)(uintptr_t)cso,
                s ? (uint32_t)(uintptr_t)s->ucode : 0,
-               s ? s->ucode_dwords : 0);
+               s ? s->ucode_dwords : 0,
+               s ? s->vfetch_count : 0);
    }
    xenos_context(pipe)->vs = cso;
 }
@@ -537,6 +449,15 @@ xenos_bind_vs_state(struct pipe_context *pipe, void *cso)
 static void
 xenos_delete_vs_state(struct pipe_context *pipe, void *cso)
 {
+   struct xenos_context *x = xenos_context(pipe);
+   {
+      static int s_dl_cap = 40;
+      if (s_dl_cap-- > 0)
+         DbgPrint("DELSH vs=%p bound=%p ucode=%p vf=%u",
+                  (const void *)cso, (const void *)x->vs,
+                  cso ? (const void *)((struct xenos_shader *)cso)->ucode : NULL,
+                  cso ? ((struct xenos_shader *)cso)->vfetch_count : 0);
+   }
    xenos_delete_shader(cso);
 }
 
@@ -880,7 +801,7 @@ xenos_prim_to_initiator(struct xenos_context *x, unsigned mode, unsigned count)
       [MESA_PRIM_TRIANGLES]     = 4,
       [MESA_PRIM_TRIANGLE_STRIP]= 6,  /* Xenia kTriangleStrip = 0x06 */
       [MESA_PRIM_TRIANGLE_FAN]  = 5,  /* Xenia kTriangleFan = 0x05 */
-      [MESA_PRIM_QUADS]         = 6,  /* expand as triangle strips */
+      [MESA_PRIM_QUADS]         = 13, /* Xenia kQuadList (see xenos_draw) */
       [MESA_PRIM_LINES_ADJACENCY]= 2,
    };
    uint32_t prim = mode < MESA_PRIM_MAX && map[mode] ? map[mode] : 4u;
@@ -1014,7 +935,7 @@ xenos_emit_frame_state(struct xenos_context *x)
    {
        /* Xenia RB_BLENDCONTROL0 bitfield (verified from registers.h):
         *   [4:0]   color_srcblend  (5 bits, Xenia BlendFactor)
-        *   [7:5]   color_comb_fcn  (3 bits: 0=ZERO, 1=ADD, 2=SUB, 3=MIN, 4=MAX)
+        *   [7:5]   color_comb_fcn  (3 bits: 0=ADD, 1=SUB, 2=MIN, 3=MAX, 4=REV_SUB)
         *   [12:8]  color_destblend (5 bits, Xenia BlendFactor)
         *   [15:13] reserved
         *   [20:16] alpha_srcblend  (5 bits, Xenia BlendFactor)
@@ -1024,48 +945,65 @@ xenos_emit_frame_state(struct xenos_context *x)
       struct pipe_blend_state *bs = (struct pipe_blend_state *)x->blend;
 
       if (bs && bs->rt[0].blend_enable) {
-         /* Map Gallium PIPE_BLENDFACTOR_* to Xenia BlendFactor.
-          * Gallium: ONE=1, SRC_COLOR=2, SRC_ALPHA=3, DST_ALPHA=4,
+         /* Map Gallium pipe_blendfactor (src/util/blend.h, indexed by
+          * pipe_rt_blend_state.rgb_src_factor) to the value Xenia decodes
+          * from RB_BLENDCONTROL[4:0].
+          *
+          * Gallium (blend.h): ONE=1, SRC_COLOR=2, SRC_ALPHA=3, DST_ALPHA=4,
           *   DST_COLOR=5, SATURATE=6, CONST_COLOR=7, CONST_ALPHA=8,
-          *   INV_SRC_COLOR=0x12, INV_SRC_ALPHA=0x13, INV_DST_ALPHA=0x14,
-          *   INV_DST_COLOR=0x15, ZERO=0x11, etc.
-          * Xenia: Zero=0, One=1, SrcColor=2, InvSrcColor=3, SrcAlpha=4,
-          *   InvSrcAlpha=5, DstAlpha=6, InvDstAlpha=7, DstColor=8,
-          *   InvDstColor=9, Sat=10, ConstColor=16, InvConstColor=17,
-          *   ConstAlpha=18, InvConstAlpha=19.
+          *   SRC1_COLOR=9, SRC1_ALPHA=10, ZERO=0x11, INV_SRC_COLOR=0x12,
+          *   INV_SRC_ALPHA=0x13, INV_DST_ALPHA=0x14, INV_DST_COLOR=0x15,
+          *   INV_CONST_COLOR=0x17, INV_CONST_ALPHA=0x18, INV_SRC1_COLOR=0x19,
+          *   INV_SRC1_ALPHA=0x1A.
+          *
+          * Xenia (xenos.h BlendFactor == raw register encoding, applied by
+          * vulkan_pipeline_cache.cc kBlendFactorMap): kZero=0, kOne=1,
+          *   2/3=unmapped (Xenia treats as kZero), kSrcColor=4,
+          *   kOneMinusSrcColor=5, kSrcAlpha=6, kOneMinusSrcAlpha=7,
+          *   kDstColor=8, kOneMinusDstColor=9, kDstAlpha=10,
+          *   kOneMinusDstAlpha=11, kConstantColor=12,
+          *   kOneMinusConstantColor=13, kConstantAlpha=14,
+          *   kOneMinusConstantAlpha=15, kSrcAlphaSaturate=16.
+          *
+          * NOTE: this is *not* the R600 encoding (r600d.h V_028804_*), where
+          * SRC_COLOR=2 and SRC_ALPHA=4 - those would decode as
+          * kSrcColor/kDstColor on Xenia and give dst*src_color instead of
+          * dst*src_alpha (opaque-looking glyphs, no anti-aliasing).
           */
          static const uint32_t xenia_blendfactor[28] = {
-            /* 0 */ 0, /* not used */
-            /* 1 PIPE_BLENDFACTOR_ONE */ 1,
-            /* 2 PIPE_BLENDFACTOR_SRC_COLOR */ 2,
-            /* 3 PIPE_BLENDFACTOR_SRC_ALPHA */ 4,
-            /* 4 PIPE_BLENDFACTOR_DST_ALPHA */ 6,
-            /* 5 PIPE_BLENDFACTOR_DST_COLOR */ 8,
-            /* 6 PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE */ 10,
-            /* 7 PIPE_BLENDFACTOR_CONST_COLOR */ 16,
-            /* 8 PIPE_BLENDFACTOR_CONST_ALPHA */ 18,
-            /* 9 PIPE_BLENDFACTOR_SRC1_COLOR */ 2,  /* treat as SRC_COLOR */
-            /* 10 PIPE_BLENDFACTOR_SRC1_ALPHA */ 4,  /* treat as SRC_ALPHA */
-            /* 11-15 unused */ 0, 0, 0, 0, 0,
-            /* 16 */ 0, /* unused */
-            /* 17 PIPE_BLENDFACTOR_ZERO */ 0,
-            /* 18 PIPE_BLENDFACTOR_INV_SRC_COLOR */ 3,
-            /* 19 PIPE_BLENDFACTOR_INV_SRC_ALPHA */ 5,
-            /* 20 PIPE_BLENDFACTOR_INV_DST_ALPHA */ 7,
-            /* 21 PIPE_BLENDFACTOR_INV_DST_COLOR */ 9,
-            /* 22-23 unused */ 0, 0,
-            /* 24 PIPE_BLENDFACTOR_INV_CONST_COLOR */ 17,
-            /* 25 PIPE_BLENDFACTOR_INV_CONST_ALPHA */ 19,
-            /* 26 PIPE_BLENDFACTOR_INV_SRC1_COLOR */ 3,  /* treat as INV_SRC_COLOR */
-            /* 27 PIPE_BLENDFACTOR_INV_SRC1_ALPHA */ 5,  /* treat as INV_SRC_ALPHA */
+            /* 0 */ 0,                                 /* unused */
+            /* 1 PIPE_BLENDFACTOR_ONE */ 1,            /* kOne */
+            /* 2 PIPE_BLENDFACTOR_SRC_COLOR */ 4,      /* kSrcColor */
+            /* 3 PIPE_BLENDFACTOR_SRC_ALPHA */ 6,      /* kSrcAlpha */
+            /* 4 PIPE_BLENDFACTOR_DST_ALPHA */ 10,     /* kDstAlpha */
+            /* 5 PIPE_BLENDFACTOR_DST_COLOR */ 8,      /* kDstColor */
+            /* 6 PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE */ 16, /* kSrcAlphaSaturate */
+            /* 7 PIPE_BLENDFACTOR_CONST_COLOR */ 12,   /* kConstantColor */
+            /* 8 PIPE_BLENDFACTOR_CONST_ALPHA */ 14,   /* kConstantAlpha */
+            /* 9 PIPE_BLENDFACTOR_SRC1_COLOR */ 4,     /* no SRC1: kSrcColor */
+            /* 10 PIPE_BLENDFACTOR_SRC1_ALPHA */ 6,    /* no SRC1: kSrcAlpha */
+            /* 11-16 unused (and Gallium never encodes 11-16) */ 0, 0, 0, 0, 0, 0,
+            /* 17 PIPE_BLENDFACTOR_ZERO */ 0,          /* kZero */
+            /* 18 PIPE_BLENDFACTOR_INV_SRC_COLOR */ 5, /* kOneMinusSrcColor */
+            /* 19 PIPE_BLENDFACTOR_INV_SRC_ALPHA */ 7, /* kOneMinusSrcAlpha */
+            /* 20 PIPE_BLENDFACTOR_INV_DST_ALPHA */ 11,/* kOneMinusDstAlpha */
+            /* 21 PIPE_BLENDFACTOR_INV_DST_COLOR */ 9, /* kOneMinusDstColor */
+            /* 22 unused */ 0,
+            /* 23 PIPE_BLENDFACTOR_INV_CONST_COLOR */ 13, /* kOneMinusConstantColor */
+            /* 24 PIPE_BLENDFACTOR_INV_CONST_ALPHA */ 15, /* kOneMinusConstantAlpha */
+            /* 25 PIPE_BLENDFACTOR_INV_SRC1_COLOR */ 5,   /* no SRC1: kOneMinusSrcColor */
+            /* 26 PIPE_BLENDFACTOR_INV_SRC1_ALPHA */ 7,   /* no SRC1: kOneMinusSrcAlpha */
+            /* 27 */ 0,
          };
-         /* Map Gallium PIPE_BLEND_* to Xenia blend function (1=ADD). */
+         /* Map Gallium pipe_blend_func (blend.h, 0..4) to xenos.h BlendOp,
+          * which is the raw RB_BLENDCONTROL[7:5] value Xenia feeds into
+          * kBlendOpMap: 0=ADD, 1=SUBTRACT, 2=MIN, 3=MAX, 4=REV_SUBTRACT. */
          static const uint32_t xenia_blendop[5] = {
-            /* PIPE_BLEND_ADD */ 1,
-            /* PIPE_BLEND_SUBTRACT */ 2,
-            /* PIPE_BLEND_REVERSE_SUBTRACT */ 5, /* R600: 5 = rev sub */
-            /* PIPE_BLEND_MIN */ 3,
-            /* PIPE_BLEND_MAX */ 4,
+            /* PIPE_BLEND_ADD */ 0,               /* kAdd */
+            /* PIPE_BLEND_SUBTRACT */ 1,          /* kSubtract */
+            /* PIPE_BLEND_REVERSE_SUBTRACT */ 4,  /* kRevSubtract */
+            /* PIPE_BLEND_MIN */ 2,               /* kMin */
+            /* PIPE_BLEND_MAX */ 3,               /* kMax */
          };
          unsigned rgb_src = bs->rt[0].rgb_src_factor & 0x1F;
          unsigned rgb_dst = bs->rt[0].rgb_dst_factor & 0x1F;
@@ -1087,10 +1025,6 @@ xenos_emit_frame_state(struct xenos_context *x)
                                (xas << 16) |
                                (xaf << 21) |
                                (xad << 24);
-         /* FS ALPHA FIX: force opaque (One/Zero) when alpha patch is active,
-          * to bypass alpha-dependent blending that produces black. */
-         if (s_alpha_patched)
-            blend_ctrl = 0x00210021u;  /* One/ADD/Zero for both RGB and alpha */
          xe_gpu_cmd_reg_write(&x->cb, XE_REG_RB_BLENDCONTROL0, blend_ctrl);
          {
             static int s_blend_log = 0;
@@ -1102,9 +1036,10 @@ xenos_emit_frame_state(struct xenos_context *x)
             }
          }
       } else {
-         /* Opaque: One/Zero/ADD for both RGB and alpha.
-          * [4:0]=1 [7:5]=1 [12:8]=0 [20:16]=1 [23:21]=1 [28:24]=0 = 0x00210021 */
-         xe_gpu_cmd_reg_write(&x->cb, XE_REG_RB_BLENDCONTROL0, 0x00210021u);
+         /* Opaque (blend disabled): One/ADD/Zero for both RGB and alpha.
+          * [4:0]=1 [7:5]=0 [12:8]=0 [20:16]=1 [23:21]=0 [28:24]=0
+          * = 0x00010001 (note: kAdd==0, kSubtract==1 in xenos.h BlendOp). */
+         xe_gpu_cmd_reg_write(&x->cb, XE_REG_RB_BLENDCONTROL0, 0x00010001u);
       }
       xe_gpu_cmd_reg_write(&x->cb, XE_REG_RB_COLOR_MASK, 0xF);
    }
@@ -1262,7 +1197,7 @@ xenos_load_shader(struct xenos_context *x, struct xenos_shader *sh,
     * To reduce false ALU matches: check must_be_one (bit 19) = 1. */
    {
       static int s_fetch_check = 0;
-      if (s_fetch_check < 20) {
+      if (s_fetch_check < 400) {
          DbgPrint("xenos: FETCHSCAN type=%u dwords=%u slots=%u", type, sh->ucode_dwords, sh->num_slots);
          /* Dump first 6 dwords of ucode header + a few slot dwords */
          for (uint32_t j = 0; j < 12 && j < sh->ucode_dwords; j++)
@@ -1315,6 +1250,12 @@ xenos_load_shader_raw(struct xenos_context *x, const uint32_t *ucode,
    x->cb.used += dwords;
 }
 
+/* DIAG: vertex count of the draw currently running through
+ * xenos_patch_vfetch (set by xenos_draw_vbo) - the count is not available
+ * inside the patch routine, but the per-element VFC print needs it to gate
+ * on large (text/sprite) draws. */
+static uint32_t s_diag_draw_count;
+
 /* Patch every recorded vfetch slot of the bound VS with the layout of the
  * currently bound vertex elements/buffers (format, stride, offset). */
 static void
@@ -1328,6 +1269,42 @@ if (!vs || !vs->vfetch_count || !ve)
        return;
     elements = ve->elements;
 
+   { /* DIAG: re-log vertex element state whenever it CHANGES (state is
+        rebound per draw; a stride-0 element here gets patched into the
+        ucode and poisons the binding Xenia bakes into SPIR-V - every
+        attribute of that fetch constant is sliced by 4 bytes). */
+      static const struct xenos_shader *s_elems_logged_vs;
+      static uint32_t s_elems_sig;
+      static unsigned s_elems_cnt;
+      extern uint32_t xenos_diag_frame;
+      unsigned cnt = x->num_vertex_elements < PIPE_MAX_ATTRIBS
+                     ? x->num_vertex_elements : PIPE_MAX_ATTRIBS;
+      uint32_t sig = 2166136261u;
+      for (unsigned a = 0; a < cnt; ++a) {
+         const uint32_t *w = (const uint32_t *)&elements[a];
+         for (unsigned b = 0; b < sizeof(elements[0]) / 4; ++b)
+            sig = (sig ^ w[b]) * 16777619u;
+      }
+      if (vs != s_elems_logged_vs || sig != s_elems_sig ||
+          cnt != s_elems_cnt) {
+         s_elems_logged_vs = vs;
+         s_elems_sig = sig;
+         s_elems_cnt = cnt;
+         DbgPrint("PATCH_VFETCH_ELEM f=%08x vs=%p count=%u",
+                  xenos_diag_frame, (const void *)vs, cnt);
+         for (unsigned a = 0; a < cnt; ++a) {
+            unsigned vbi = elements[a].vertex_buffer_index;
+            unsigned user = (vbi < PIPE_MAX_ATTRIBS)
+               ? x->vertex_buffers[vbi].is_user_buffer : 9u;
+            DbgPrint("PATCH_VFETCH_ELEM f=%08x vs=%p a=%u stride=%u off=%u "
+                     "fmt=%u vb=%u user=%u",
+                     xenos_diag_frame, (const void *)vs, a,
+                     elements[a].src_stride, elements[a].src_offset,
+                     elements[a].src_format, vbi, user);
+         }
+      }
+   }
+
     for (uint32_t f = 0; f < vs->vfetch_count; ++f) {
        struct xenos_vfetch_fixup *fx = &vs->vfetch[f];
        const struct pipe_vertex_element *e = NULL;
@@ -1335,8 +1312,14 @@ if (!vs || !vs->vfetch_count || !ve)
        uint32_t phys, out[3];
 
        if (fx->attrib >= x->num_vertex_elements ||
-           fx->attrib >= PIPE_MAX_ATTRIBS)
+           fx->attrib >= PIPE_MAX_ATTRIBS) {
+          extern uint32_t xenos_diag_frame;
+          static int s_skip_cap0 = 30;
+          if (s_skip_cap0-- > 0)
+             DbgPrint("PATCH_VFETCH_SKIP f=%08x reason=attr attr=%u num_elem=%u",
+                      xenos_diag_frame, fx->attrib, x->num_vertex_elements);
           continue;
+       }
        e = &elements[fx->attrib];
       vb = &x->vertex_buffers[e->vertex_buffer_index];
       if (!vb)
@@ -1345,8 +1328,14 @@ if (!vs || !vs->vfetch_count || !ve)
       if (!vb->is_user_buffer && vb->buffer.resource)
          phys = (xenos_resource(vb->buffer.resource)->gpu_addr << 2) +
                 vb->buffer_offset;
-      else
+      else {
+         extern uint32_t xenos_diag_frame;
+         static int s_skip_cap1 = 30;
+         if (s_skip_cap1-- > 0)
+            DbgPrint("PATCH_VFETCH_SKIP f=%08x reason=nobuf attr=%u user=%u",
+                     xenos_diag_frame, fx->attrib, vb->is_user_buffer);
          continue;   /* user buffers need the uploader (M2) */
+      }
 
       phys += e->src_offset;
 
@@ -1362,7 +1351,8 @@ xe_ucode_vfetch(out, fx->attrib, fx->dst_gpr, XE_UCODE_DST_SWIZ_XYZW,
           uint32_t df = xenos_diag_frame;
           static int s_pf_log = 0;
           if ((df < 30u) || (df >= 5000u && df <= 5010u) ||
-              (df >= 10000u && df <= 10010u) || s_pf_log++ < 20) {
+              (df >= 10000u && df <= 10010u) || s_pf_log++ < 20 ||
+              e->src_stride == 0 || (out[2] & 0xFF) == 0) {
              uint32_t patched_stride = out[2] & 0xFF;
              DbgPrint("PATCH_VFETCH f=%08x attr=%u dst_gpr=%u "
                       "stride_bytes=%u stride_dw=%u uc_dw=%u out2=0x%08x\n",
@@ -1428,13 +1418,36 @@ xe_ucode_vfetch(out, fx->attrib, fx->dst_gpr, XE_UCODE_DST_SWIZ_XYZW,
          extern uint32_t xenos_diag_frame;
          uint32_t df = xenos_diag_frame;
          static int s_vf_log = 0;
-         if ((df < 30u) || (df >= 5000u && df <= 5010u) ||
-             (df >= 10000u && df <= 10010u) || s_vf_log++ < 12)
-           DbgPrint("[VFC] f=%08x i=%u fmt=%u stride=%u src_off=%u vb=%u "
-                    "phys=0x%08x bytes=%u",
-                    df, i, xenos_vfmt(e->src_format),
-                    e->src_stride >> 2, e->src_offset,
-                    e->vertex_buffer_index, phys, fetch_bytes);
+         static unsigned s_vf_big = 0;
+         static unsigned s_vf_sml = 0;
+         int vf_print = (df < 30u) || (df >= 5000u && df <= 5010u) ||
+                        (df >= 10000u && df <= 10010u) || s_vf_log++ < 12;
+         /* DIAG: the boot windows + s_vf_log<12 all die before in-game, so
+          * keep sampling large draws (dc>=100) forever, and flag any large
+          * draw whose fetchable range is under 4KB - the bound check would
+          * zero the tail vertices of a 228-vertex text run. */
+         if (s_diag_draw_count >= 100u) {
+            unsigned n = s_vf_big++;
+            if (n < 60u || (n % 600u) == 0u)
+               vf_print = 1;
+            if (fetch_bytes < 4096u) {
+               unsigned m = s_vf_sml++;
+               if (m < 60u || (m % 600u) == 0u)
+                  vf_print = 1;
+            }
+         }
+         if (vf_print) {
+            struct xenos_resource *xrv = xenos_resource(vb->buffer.resource);
+            unsigned vf_sml =
+               (s_diag_draw_count >= 100u && fetch_bytes < 4096u) ? 1u : 0u;
+            DbgPrint("[VFC] f=%08x i=%u fmt=%u stride=%u src_off=%u vb=%u "
+                     "phys=0x%08x bytes=%u ne=%u dc=%u rsz=%u boff=%u sml=%u",
+                     df, i, xenos_vfmt(e->src_format),
+                     e->src_stride >> 2, e->src_offset,
+                     e->vertex_buffer_index, phys, fetch_bytes,
+                     x->num_vertex_elements, s_diag_draw_count, xrv->size,
+                     vb->buffer_offset, vf_sml);
+         }
        }
        ctx_reserve(x, 3);
        xe_gpu_cmd_reg_writen(&x->cb,
@@ -1752,10 +1765,6 @@ xenos_clear(struct pipe_context *pipe, unsigned buffers,
 {
    struct xenos_context *x = xenos_context(pipe);
 
-    DbgPrint("xenos: clear called buffers=%08x w=%u h=%u color=[%.3f %.3f %.3f %.3f] depth=%.3f\n",
-             buffers, x->framebuffer.width, x->framebuffer.height,
-             color ? color->f[0] : -1, color ? color->f[1] : -1,
-             color ? color->f[2] : -1, color ? color->f[3] : -1, depth);
     {
        static int s_clear_log = 0;
        if (s_clear_log++ < 12 && color) {
@@ -1850,11 +1859,8 @@ xenos_clear(struct pipe_context *pipe, unsigned buffers,
       x->clear_vs_dwords = xe_ucode_build_vs_minimal(x->clear_vs);
       x->clear_ps_dwords = xe_ucode_build_ps_minimal(x->clear_ps);
    }
-   DbgPrint("xenos: clear shaders built\n");
    xenos_load_shader_raw(x, x->clear_vs, x->clear_vs_dwords, 0);
-   DbgPrint("xenos: clear vs loaded\n");
    xenos_load_shader_raw(x, x->clear_ps, x->clear_ps_dwords, 1);
-   DbgPrint("xenos: clear ps loaded\n");
 
    if (buffers & PIPE_CLEAR_COLOR) {
       /* The Xbox 360 GPU treats NaN as 0 when converting float to unorm8.
@@ -1919,7 +1925,7 @@ xenos_draw_vbo(struct pipe_context *pipe,
       extern uint32_t xenos_diag_frame;
       uint32_t df = xenos_diag_frame;
       bool logit = df < 30u || (df >= 5000u && df <= 5010u) ||
-                   (df >= 10000u && df <= 10010u);
+                   (df >= 10000u && df <= 10010u) || (df % 2000u == 0);
       if (logit) {
          struct pipe_framebuffer_state *fb = &x->framebuffer;
          struct xenos_resource *color =
@@ -1962,6 +1968,38 @@ xenos_draw_vbo(struct pipe_context *pipe,
                         src[8], src[9], src[10], src[11], src[12], src[13],
                         src[14], src[15]);
             }
+            /* DIAG: per-attribute binding exactly as the fetch constant will
+             * see it (phys/size), plus the first 8 records of each
+             * attribute's stream (pos/uv fields = vp[0..1], color = vp[0..3])
+             * so all four quad corners are observable at draw time. */
+            for (unsigned k = 0; k < ve->count && k < 4; ++k) {
+               const struct pipe_vertex_element *ek = &ve->elements[k];
+               struct pipe_vertex_buffer *vk =
+                  &x->vertex_buffers[ek->vertex_buffer_index];
+               if (!vk || vk->is_user_buffer || !vk->buffer.resource)
+                  continue;
+               struct xenos_resource *xrk =
+                  xenos_resource(vk->buffer.resource);
+               const uint32_t *b =
+                  (const uint32_t *)((const char *)xrk->data +
+                                     vk->buffer_offset + ek->src_offset);
+               uint32_t pphys = (uint32_t)((xrk->gpu_addr << 2) +
+                                           vk->buffer_offset +
+                                           ek->src_offset);
+               DbgPrint("  vE%u phys=%08x xrsize=%u vboff=%u stroff=%u "
+                        "stride=%u",
+                        k, pphys, (uint32_t)xrk->size,
+                        (uint32_t)vk->buffer_offset,
+                        (uint32_t)ek->src_offset, ek->src_stride);
+               unsigned sdw = ek->src_stride >> 2;
+               if (!sdw)
+                  sdw = 8;
+               for (unsigned j = 0; j < 8; ++j) {
+                  const uint32_t *vp = b + j * sdw;
+                  DbgPrint("  vE%u j%u =%08x,%08x,%08x,%08x", k, j,
+                           vp[0], vp[1], vp[2], vp[3]);
+               }
+            }
          }
          /* Draw-time ucode content (post vfetch patch): fingerprint boot
           * vs in-game so an in-place shader mutation can't hide. */
@@ -1986,32 +2024,6 @@ xenos_draw_vbo(struct pipe_context *pipe,
       }
    }
 
-   /* DIAGNOSTIC: compact per-draw inventory for EVERY draw, one line, so any
-    * dev frame found by the Xenia DEVSCAN monitor can be correlated with the
-    * draws that ran that frame (same xenos_diag_frame basis). */
-   {
-      extern uint32_t xenos_diag_frame;
-      struct pipe_framebuffer_state *fb = &x->framebuffer;
-      struct xenos_resource *color =
-         fb->cbufs[0].texture ? xenos_resource(fb->cbufs[0].texture) : NULL;
-      uint32_t vw = 0, vh = 0, vfmt = 0xFFFFFFFFu;
-      for (unsigned svi = 0; svi < x->num_sampler_views; svi++) {
-         struct pipe_sampler_view *sv = x->sampler_views[svi];
-         if (sv && sv->texture) {
-            vw = sv->texture->width0;
-            vh = sv->texture->height0;
-            vfmt = (unsigned)sv->format;
-            break;
-         }
-      }
-      DbgPrint("DBG f=%08x mode=%08x count=%08x fbw=%08x fbh=%08x "
-               "ebase=%08x vs=%08x fs=%08x vw=%08x vh=%08x vfmt=%08x",
-               xenos_diag_frame, dinfo->mode, draws[0].count, fb->width,
-               fb->height, color ? color->edram_base : 0xFFFFFFFFu,
-               (uint32_t)(uintptr_t)x->vs, (uint32_t)(uintptr_t)x->fs,
-               vw, vh, vfmt);
-   }
-
    {
       static int s_guard = 0;
       if (s_guard < 10) {
@@ -2033,12 +2045,11 @@ xenos_draw_vbo(struct pipe_context *pipe,
       xenos_resource(x->framebuffer.zsbuf.texture)->rendered = 1;
 
    for (unsigned d = 0; d < num_draws; d++) {
+      s_diag_draw_count = draws[d].count;
       xenos_emit_frame_state(x);
       xenos_patch_vfetch(x);
       xenos_load_shader(x, x->vs, 0);
       xenos_load_shader(x, x->fs, 1);
-      /* FS ALPHA FIX v6: constant-1 mechanism handles alpha=1.0 in ucode.
-       * No SQ_PS_CONST or constant upload needed. */
       xenos_upload_constants(x, x->vs, MESA_SHADER_VERTEX);
       {
          static int ulog = 0;
@@ -2052,18 +2063,29 @@ xenos_draw_vbo(struct pipe_context *pipe,
       }
       xenos_upload_constants(x, x->fs, MESA_SHADER_FRAGMENT);
       xenos_emit_texture_fetch_constants(x);
-      /* QUADS: the Xbox 360 GPU has no native quad primitive.
-       * Expand each quad (4 verts) into a separate triangle-strip draw
-       * so vertices are consumed in the correct groups of 4. */
+      /* QUADS: send each GL quad (4 verts, perimeter order v0..v3, GL
+       * triangulates it as 0,1,2 + 0,2,3) as a Xenos QUAD_LIST (prim type 13)
+       * - not a triangle strip.
+       *
+       * Xenia expands quad lists correctly for perimeter-ordered quads: the
+       * geometry-shader path reorders to the GL_QUAD_STRIP order 0,1,3,2
+       * (vulkan_pipeline_cache.cc, kQuadList), and the CPU fallback builtin
+       * index buffer uses 0,1,2 + 0,2,3 (primitive_processor.cc) - both
+       * cover the whole quad.
+       *
+       * Sending these vertices as a 4-vertex triangle *strip* instead emits
+       * 0,1,2 + 1,2,3, which leaves the triangle (v0,v3,centre) undrawn -
+       * every glyph lost its left triangle and rendered as a wedge/arc.
+       *
+       * One sub-draw per quad, offset into the vertex buffer with
+       * VGT_INDX_OFFSET (auto-indexed, 4 vertices -> 2 triangles). */
       if (dinfo->mode == MESA_PRIM_QUADS) {
          unsigned total = draws[d].count;
          for (unsigned q = 0; q + 3 < total; q += 4) {
-            /* Each sub-draw: TRIANGLE_STRIP of 4 verts, offset to the
-             * correct quad in the vertex buffer. */
-            uint32_t prim = 6u /* Xenia kTriangleStrip */ |
+            uint32_t prim = 13u /* Xenia kQuadList = 0x0D */ |
                             (XE_SOURCE_SEL_AUTO_INDEX << 6) |
                             (XE_MAJOR_MODE_IMPLICIT << 8) |
-                            (4u << 16); /* 4 vertices → 2 triangles */
+                            (4u << 16); /* 4 vertices -> 1 quad */
             ctx_reserve(x, 5);
             xe_gpu_cmd_reg_write(&x->cb, XE_REG_VGT_MAX_VTX_INDX, 3);
             xe_gpu_cmd_reg_write(&x->cb, XE_REG_VGT_MIN_VTX_INDX, 0);
@@ -2375,15 +2397,6 @@ xenos_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
    dw = info->dst.resource->width0;
    dh = info->dst.resource->height0;
 
-   DbgPrint("xenos: blitD %ux%u bx=%d by=%d bz=%d bw=%d bh=%d", dw, dh,
-            info->dst.box.x, info->dst.box.y, info->dst.box.z,
-            info->dst.box.width, info->dst.box.height);
-   DbgPrint("xenos: blitS %ux%u sx=%d sy=%d sw=%d sh=%d", sw, sh,
-            info->src.box.x, info->src.box.y, info->src.box.width,
-            info->src.box.height);
-   DbgPrint("xenos: blitM mask=%x filter=%u dstf=%u swz=%u", info->mask,
-            info->filter, (unsigned)info->dst.format, (unsigned)1);
-
    if (!src->has_edram || !src->resolve_data)
       return;                     /* source has no EDRAM backing to resolve */
 
@@ -2463,9 +2476,6 @@ xenos_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
                            float_bits(0.5f));
       xe_gpu_cmd_reg_write(&x->cb, XE_REG_PA_CL_VPORT_ZOFFSET,
                            float_bits(0.5f));
-      DbgPrint("xenos: blitVP = sx=%08x sy=%08x tx=%08x ty=%08x dw=%u dh=%u",
-               float_bits(xs), float_bits(ys), float_bits(xt), float_bits(yt),
-               dw, dh);
    }
 
    /* 3. Texture fetch constant for the source's resolved tiled backing at the
@@ -2728,9 +2738,6 @@ xenos_flush_frame(struct pipe_context *pipe, struct pipe_resource *color,
 
    w = color->width0;
    h = color->height0;
-
-   DbgPrint("xenos: flush_frame %ux%u edram_base=%u resolve_phys=0x%08x\n",
-            w, h, res->edram_base, res->resolve_phys);
 
    /* resolve_data is a guest VA (MmAllocatePhysicalMemoryEx); host-side reads
     * see zeros because the GPU writes to the guest PA.  The resolve IS working

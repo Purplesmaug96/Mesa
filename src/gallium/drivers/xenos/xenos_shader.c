@@ -304,6 +304,12 @@ xe_vfetch(struct xe_cctx *c, uint32_t attrib, uint32_t dst_gpr)
                    XE_UCODE_FORMAT_32_32_32_32_FLOAT, 1, 0, true, true);
     uint32_t slot_idx = c->num_slots;
     if (c->vfetch_count < 16) {
+       {
+          static int s_vfr_cap = 40;
+          if (s_vfr_cap-- > 0)
+             DbgPrint("VFREC attrib=%u ucd=%u cnt=%u slots=%u", attrib,
+                      3 + 3 * slot_idx, c->vfetch_count, c->num_slots);
+       }
        c->vfetch[c->vfetch_count].ucode_dword = 3 + 3 * slot_idx;
        c->vfetch[c->vfetch_count].attrib = attrib;
        c->vfetch[c->vfetch_count].dst_gpr = dst_gpr;
@@ -870,6 +876,9 @@ free(c.defs);
       memcpy(shader->vfetch, c.vfetch,
              c.vfetch_count * sizeof(*c.vfetch));
       shader->vfetch_count = c.vfetch_count;
+      DbgPrint("[FINISH] sh=%p vf=%u slots=%u dwords=%u",
+               (const void *)shader, shader->vfetch_count,
+               shader->num_slots, shader->ucode_dwords);
    }
 
    free(c.defs);
