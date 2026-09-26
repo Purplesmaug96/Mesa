@@ -410,6 +410,31 @@ etna_calculate_clear_bits(enum pipe_format format, unsigned clear_mask)
 }
 
 static void
+etna_blt_clear_ts(struct etna_context *ctx, struct etna_resource *res,
+                  struct etna_resource_level *level)
+{
+   struct blt_clear_op clr = {};
+
+   assert(level->ts_needs_clear);
+
+   clr.dest.addr.bo = res->ts_bo;
+   clr.dest.addr.offset = level->ts_offset;
+   clr.dest.addr.flags = ETNA_RELOC_WRITE;
+   clr.dest.format = BLT_FORMAT_A8R8G8B8;
+   clr.dest.bpp = 4;
+   clr.dest.stride = 0x40;
+   clr.dest.tiling = ETNA_LAYOUT_LINEAR;
+   clr.clear_bits[0] = 0xffffffff;
+   clr.clear_bits[1] = 0xffffffff;
+   clr.rect_w = 0x40 / 4;
+   clr.rect_h = level->ts_layer_stride / 0x40;
+
+   emit_blt_clearimage(ctx, &clr);
+
+   level->ts_needs_clear = false;
+}
+
+static void
 etna_blit_clear_color_blt(struct pipe_context *pctx, unsigned idx,
                       const union pipe_color_union *color,
                       const struct pipe_scissor_state *scissor_state,
@@ -420,11 +445,13 @@ etna_blit_clear_color_blt(struct pipe_context *pctx, unsigned idx,
    struct etna_resource *dst_res = etna_resource_get_render_compatible(pctx, dst->texture);
    struct etna_resource_level *dst_level = &dst_res->levels[dst->level];
    uint64_t new_clear_value = etna_clear_blit_pack_rgba(dst->format, color, ctx->screen);
-   const uint64_t clear_bits = etna_calculate_clear_bits(dst->format, clear_mask);
-   bool fast_clear = etna_blt_will_fastclear(dst_level, scissor_state, clear_mask, 0xf);
-   bool use_ts = etna_framebuffer_rt_use_ts(ctx, idx);
-   int msaa_xscale = 1, msaa_yscale = 1;
    bool is_128bit_format = format_is_128bit(dst->format);
+   const uint64_t clear_bits = is_128bit_format ? 0 :
+      etna_calculate_clear_bits(translate_pe_internal_format(dst->format, ctx->screen), clear_mask);
+   bool fast_clear = etna_blt_will_fastclear(dst_level, scissor_state, clear_mask, 0xf);
+   bool use_ts = etna_framebuffer_rt_use_ts(ctx, idx) &&
+                 (etna_resource_level_ts_valid(dst_level) || dst_level->ts_needs_clear);
+   int msaa_xscale = 1, msaa_yscale = 1;
 
    translate_samples_to_xyscale(dst->texture->nr_samples,
                                 &msaa_xscale, &msaa_yscale);
@@ -441,6 +468,9 @@ etna_blit_clear_color_blt(struct pipe_context *pctx, unsigned idx,
    clr.dest.tiling = dst_res->layout;
 
    if (use_ts) {
+      if (unlikely(dst_level->ts_needs_clear))
+         etna_blt_clear_ts(ctx, dst_res, dst_level);
+
       clr.dest.use_ts = 1;
       clr.dest.ts_addr.bo = dst_res->ts_bo;
       clr.dest.ts_addr.offset = dst_level->ts_offset;
@@ -469,15 +499,25 @@ etna_blit_clear_color_blt(struct pipe_context *pctx, unsigned idx,
    }
 
    if (is_128bit_format) {
+      const uint64_t rg_bits =
+         etna_calculate_clear_bits(translate_format_128bit_to_64bit(dst->format), clear_mask);
+
       clr.clear_value[0] = color->ui[0];
       clr.clear_value[1] = color->ui[1];
+      clr.clear_bits[0] = rg_bits;
+      clr.clear_bits[1] = rg_bits >> 32;
    }
 
    emit_blt_clearimage(ctx, &clr);
 
    if (is_128bit_format) {
+      const uint64_t ba_bits =
+         etna_calculate_clear_bits(translate_format_128bit_to_64bit(dst->format), clear_mask >> 2);
+
       clr.clear_value[0] = color->ui[2];
       clr.clear_value[1] = color->ui[3];
+      clr.clear_bits[0] = ba_bits;
+      clr.clear_bits[1] = ba_bits >> 32;
       clr.dest.addr.offset += etna_resource_level_second_plane_offset(dst_level);
 
       emit_blt_clearimage(ctx, &clr);
@@ -530,10 +570,12 @@ etna_blit_clear_zs_blt(struct pipe_context *pctx, struct pipe_surface *dst,
    switch (dst->format) {
    case PIPE_FORMAT_Z16_UNORM:
    case PIPE_FORMAT_X8Z24_UNORM:
+   case PIPE_FORMAT_Z32_FLOAT:
       clear_bits_depth = 0xffffffff;
       clear_bits_stencil = 0x00000000;
       break;
    case PIPE_FORMAT_S8_UINT_Z24_UNORM:
+   case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
       clear_bits_depth = 0xffffff00;
       clear_bits_stencil = clear_mask;
       break;
@@ -560,6 +602,9 @@ etna_blit_clear_zs_blt(struct pipe_context *pctx, struct pipe_surface *dst,
    clr.dest.tiling = dst_res->layout;
 
    if (dst_level->ts_size) {
+      if (unlikely(dst_level->ts_needs_clear))
+         etna_blt_clear_ts(ctx, dst_res, dst_level);
+
       clr.dest.use_ts = 1;
       clr.dest.ts_addr.bo = dst_res->ts_bo;
       clr.dest.ts_addr.offset = dst_level->ts_offset;

@@ -608,6 +608,8 @@ Intel driver environment variables
    ``no-resource-barrier``
       disable RENDER_BARRIER instruction usage by falling back to
       PIPE_CONTROL
+   ``no-jay``
+      disable the Jay compiler and fall back to the older brw compiler
    ``optimizer``
       dump shader assembly to files at each optimization pass and
       iteration that make progress (Gfx < 9)
@@ -1642,6 +1644,8 @@ RADV driver environment variables
       enable experimental video decoding support on GFX6-9
    ``video_encode``
       enable experimental video encoding support on GFX6-9
+   ``elf``
+      Use the ELF format internally for shader binaries. Requires RADV to be compiled with LLVM support.
 
 .. envvar:: RADV_TEX_ANISO
 
@@ -1819,6 +1823,9 @@ RADV driver environment variables
    ``full``
      mitigate the issue completely, no risk but performance might be decreased
      (default value)
+   ``full_rez``
+     mitigate the issue completely and force early-Z-then-ReZ to recover some
+     of the early-Z rejection lost by disabling HiZ
 
 RadeonSI driver environment variables
 -------------------------------------
@@ -2299,6 +2306,29 @@ PowerVR driver environment variables
 .. envvar:: PCO_COLOR
 
    if set to ``auto`` PCO IR will be colorized if stdout is not a pipe.
+   Color is forced off if set to ``off``/``0`` or on if set to ``on``/``1``.
+   Defaults to ``auto``.
+
+.. envvar:: PDSC_DEBUG
+
+   A comma-separated list of named flags for the PDS compiler,
+   which control various compilation options:
+
+   ``val_skip``
+      Skip IR validation.
+
+   ``print``
+      Print the PDS IR.
+
+   ``raw_regs``
+      Print raw regs, not names.
+
+   ``print_binary``
+      Print the PDS binary.
+
+.. envvar:: PDSC_COLOR
+
+   if set to ``auto`` PDSC IR will be colorized if stdout is not a pipe.
    Color is forced off if set to ``off``/``0`` or on if set to ``on``/``1``.
    Defaults to ``auto``.
 

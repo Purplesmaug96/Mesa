@@ -420,6 +420,17 @@ anv_h264_dpb_slot_poc(const VkVideoEncodeInfoKHR *enc_info, uint8_t slot_index)
    return 0;
 }
 
+static bool
+anv_h264_ref_slot_is_intra(const VkVideoReferenceSlotInfoKHR *slot)
+{
+   const VkVideoEncodeH264DpbSlotInfoKHR *dpb =
+      vk_find_struct_const(slot->pNext, VIDEO_ENCODE_H264_DPB_SLOT_INFO_KHR);
+   if (!dpb || !dpb->pStdReferenceInfo)
+      return false;
+   return dpb->pStdReferenceInfo->primary_pic_type == STD_VIDEO_H264_PICTURE_TYPE_I ||
+          dpb->pStdReferenceInfo->primary_pic_type == STD_VIDEO_H264_PICTURE_TYPE_IDR;
+}
+
 static void
 anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *enc_info)
 {
@@ -440,6 +451,7 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
    bool post_deblock_enable = anv_post_deblock_enable(pps, frame_info);
    bool rc_disable = cmd->video.vid->rc_mode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR;
    uint8_t dpb_idx[ANV_VIDEO_H264_MAX_NUM_REF_FRAME] = { 0,};
+   bool colloc_rd_en = false;
 
    const struct anv_image_view *base_ref_iv;
    uint32_t base_ref_array_layer;
@@ -689,6 +701,7 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
       };
 
       const VkVideoReferenceSlotInfoKHR *l0_slots[2] = { NULL, NULL };
+      const VkVideoReferenceSlotInfoKHR *l1_slot = NULL;
       unsigned num_l0 = 0;
       for (unsigned i = 0; ref_list_info && num_l0 < 2 &&
            i < ref_list_info->num_ref_idx_l0_active_minus1 + 1u; i++) {
@@ -701,10 +714,32 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
       if (l0_slots[0]) {
          const struct anv_image_view *l0_iv =
             anv_image_view_from_handle(l0_slots[0]->pPictureResource->imageViewBinding);
-         vdenc_buf.ColocatedMVReadBuffer.Address =
-               anv_image_dmv_top_address(l0_iv, l0_slots[0]->pPictureResource->baseArrayLayer);
          vdenc_buf.FWDREF0.Address =
                anv_image_dpb_address(l0_iv, l0_slots[0]->pPictureResource->baseArrayLayer);
+      }
+      if (l0_slots[1]) {
+         const struct anv_image_view *l0_iv =
+            anv_image_view_from_handle(l0_slots[1]->pPictureResource->imageViewBinding);
+         vdenc_buf.FWDREF1.Address =
+               anv_image_dpb_address(l0_iv, l0_slots[1]->pPictureResource->baseArrayLayer);
+      }
+
+      if (frame_info->pStdPictureInfo->primary_pic_type == STD_VIDEO_H264_PICTURE_TYPE_B &&
+          ref_list_info &&
+          ref_list_info->RefPicList1[0] != STD_VIDEO_H264_NO_REFERENCE_PICTURE)
+         l1_slot = &enc_info->pReferenceSlots[dpb_idx[ref_list_info->RefPicList1[0]]];
+
+      /* TODO: Needs to read a dedicated all-intra colocated buffer when L1[0] is an I picture. */
+      colloc_rd_en = l1_slot && !anv_h264_ref_slot_is_intra(l1_slot);
+
+      if (l1_slot) {
+         const struct anv_image_view *l1_iv =
+            anv_image_view_from_handle(l1_slot->pPictureResource->imageViewBinding);
+         vdenc_buf.BWDREF0.Address =
+               anv_image_dpb_address(l1_iv, l1_slot->pPictureResource->baseArrayLayer);
+         if (colloc_rd_en)
+            vdenc_buf.ColocatedMVReadBuffer.Address =
+                  anv_image_dmv_top_address(l1_iv, l1_slot->pPictureResource->baseArrayLayer);
       }
 
       vdenc_buf.ColocatedMVReadBuffer.PictureFields = (struct GENX(VDENC_SURFACE_CONTROL_BITS)) {
@@ -715,13 +750,6 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
          .MOCS = anv_mocs(cmd->device, vdenc_buf.FWDREF0.Address.bo, 0),
       };
 
-      if (l0_slots[1]) {
-         const struct anv_image_view *l1_iv =
-            anv_image_view_from_handle(l0_slots[1]->pPictureResource->imageViewBinding);
-         vdenc_buf.FWDREF1.Address =
-               anv_image_dpb_address(l1_iv, l0_slots[1]->pPictureResource->baseArrayLayer);
-      }
-
       vdenc_buf.FWDREF1.PictureFields = (struct GENX(VDENC_SURFACE_CONTROL_BITS)) {
          .MOCS = anv_mocs(cmd->device, vdenc_buf.FWDREF1.Address.bo, 0),
       };
@@ -730,21 +758,6 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
          .MOCS = anv_mocs(cmd->device, NULL, 0),
       };
 
-      /* B-frame backward (L1) reference recon surface. */
-      if (frame_info->pStdPictureInfo->primary_pic_type == STD_VIDEO_H264_PICTURE_TYPE_B &&
-          ref_list_info) {
-         uint8_t bwd_slot = ref_list_info->RefPicList1[0];
-         for (unsigned j = 0; bwd_slot != STD_VIDEO_H264_NO_REFERENCE_PICTURE &&
-                              j < enc_info->referenceSlotCount; j++) {
-            if (enc_info->pReferenceSlots[j].slotIndex != (int32_t)bwd_slot)
-               continue;
-            const struct anv_image_view *bwd_iv = anv_image_view_from_handle(
-               enc_info->pReferenceSlots[j].pPictureResource->imageViewBinding);
-            vdenc_buf.BWDREF0.Address = anv_image_dpb_address(
-               bwd_iv, enc_info->pReferenceSlots[j].pPictureResource->baseArrayLayer);
-            break;
-         }
-      }
       vdenc_buf.BWDREF0.PictureFields = (struct GENX(VDENC_SURFACE_CONTROL_BITS)) {
          .MOCS = anv_mocs(cmd->device, vdenc_buf.BWDREF0.Address.bo, 0),
       };
@@ -801,8 +814,11 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
       vdenc_buf.IntraPredictionRowStoreBuffer.PictureFields = (struct GENX(VDENC_SURFACE_CONTROL_BITS)) {
          .MOCS = anv_mocs(cmd->device, NULL, 0),
       };
+      if (enc_info->pSetupReferenceSlot)
+         vdenc_buf.ColocatedMVAVCWriteBuffer.Address =
+            anv_image_dmv_top_address(base_ref_iv, base_ref_array_layer);
       vdenc_buf.ColocatedMVAVCWriteBuffer.PictureFields = (struct GENX(VDENC_SURFACE_CONTROL_BITS)) {
-         .MOCS = anv_mocs(cmd->device, NULL, 0),
+         .MOCS = anv_mocs(cmd->device, vdenc_buf.ColocatedMVAVCWriteBuffer.Address.bo, 0),
       };
       vdenc_buf.Additional4XDSFWDREF.PictureFields = (struct GENX(VDENC_SURFACE_CONTROL_BITS)) {
          .MOCS = anv_mocs(cmd->device, NULL, 0),
@@ -973,7 +989,7 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
 
          if (is_bframe && ref_list_info) {
             uint8_t slot = ref_list_info->RefPicList1[0];
-            img.CollocMVRDEn = true;
+            img.CollocMVRDEn = colloc_rd_en;
             img.BidirectionalWeight = 0x20;
             img.NumberOfL1ReferencesMinusOne = ref_list_info->num_ref_idx_l1_active_minus1;
             if (slot != STD_VIDEO_H264_NO_REFERENCE_PICTURE) {
@@ -1316,7 +1332,8 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
                               ref_list_info->RefPicList0[i] :
                               STD_VIDEO_H264_NO_REFERENCE_PICTURE;
                ref.ReferenceListEntry[i] =
-                  slot == STD_VIDEO_H264_NO_REFERENCE_PICTURE ? 0x80 : dpb_idx[slot];
+                  slot == STD_VIDEO_H264_NO_REFERENCE_PICTURE ? 0x80 : (dpb_idx[slot] << 1);
+
             }
          }
       }
@@ -1330,7 +1347,7 @@ anv_h264_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
                               ref_list_info->RefPicList1[i] :
                               STD_VIDEO_H264_NO_REFERENCE_PICTURE;
                ref.ReferenceListEntry[i] =
-                  slot == STD_VIDEO_H264_NO_REFERENCE_PICTURE ? 0x80 : dpb_idx[slot];
+                  slot == STD_VIDEO_H264_NO_REFERENCE_PICTURE ? 0x80 : (dpb_idx[slot] << 1);
             }
          }
       }
@@ -2940,15 +2957,6 @@ anv_h265_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *en
 #define AVP_BITSTREAM_BYTECOUNT_TILE_NOHEADER_REG 0x1C2B4C
 #define AVP_BITSTREAM_BYTECOUNT_TILE_REG          0x1C2B48
 
-static int32_t
-anv_av1_relative_dist(int32_t m, uint32_t a, uint32_t b)
-{
-   if (!m)
-      return 0;
-   int32_t diff = (int32_t)a - (int32_t)b;
-   return (diff & (m - 1)) - (diff & m);
-}
-
 static void
 anv_av1_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *enc_info)
 {
@@ -3245,19 +3253,22 @@ anv_av1_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *enc
    const StdVideoAV1TileInfo *ti = pic_info->pTileInfo;
    uint32_t num_tile_cols = ti ? ti->TileCols : 1;
    uint32_t num_tile_rows = ti ? ti->TileRows : 1;
+   const uint32_t sb_size = seq_hdr->flags.use_128x128_superblock ? 128 : 64;
+   const uint32_t pic_width_in_sb =
+      DIV_ROUND_UP(src_img->vk.extent.width, sb_size);
+   const uint32_t pic_height_in_sb =
+      DIV_ROUND_UP(src_img->vk.extent.height, sb_size);
    /* AV1 uniform tiling (5.9.15): the requested TileCols/TileRows may not
     * divide the frame evenly, so the actual tile count derived by the decoder
     * (tileWidthSb = ceil(sb / 2^log2); num = ceil(sb / tileWidthSb)) can be
     * smaller. Recompute it so we never emit a zero-width/height tail tile. */
    if (!ti || ti->flags.uniform_tile_spacing_flag) {
-      uint32_t sb_sz = seq_hdr->flags.use_128x128_superblock ? 128 : 64;
-      uint32_t pw_sb = DIV_ROUND_UP(src_img->vk.extent.width, sb_sz);
-      uint32_t ph_sb = DIV_ROUND_UP(src_img->vk.extent.height, sb_sz);
-      uint32_t cw = 1, ch = 1;
-      while (cw < num_tile_cols) cw <<= 1;
-      while (ch < num_tile_rows) ch <<= 1;
-      num_tile_cols = DIV_ROUND_UP(pw_sb, DIV_ROUND_UP(pw_sb, cw));
-      num_tile_rows = DIV_ROUND_UP(ph_sb, DIV_ROUND_UP(ph_sb, ch));
+      uint32_t cw = util_next_power_of_two(num_tile_cols);
+      uint32_t ch = util_next_power_of_two(num_tile_rows);
+      num_tile_cols = DIV_ROUND_UP(pic_width_in_sb,
+                                   DIV_ROUND_UP(pic_width_in_sb, cw));
+      num_tile_rows = DIV_ROUND_UP(pic_height_in_sb,
+                                   DIV_ROUND_UP(pic_height_in_sb, ch));
    }
 
    uint32_t num_tiles = num_tile_cols * num_tile_rows;
@@ -3391,19 +3402,21 @@ anv_av1_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *enc
                          buf.IntraBCDecodedOutputFrameBufferAddress.bo,
                          .TiledResourceMode = TRMODE_TILEF);
 
-         ANV_VID_CACHE_INIT(buf, BitstreamLineRowstoreBuffer, cmd->device, 0);
+         ANV_VID_CACHE_INIT(buf, BitstreamLineRowstoreBuffer, cmd->device,
+                            ANV_AV1_ROWSTORE_BTDL_OFFSET);
          ANV_VID_CACHE_INIT(buf, IntraPredictionLineRowstoreBuffer,
-                            cmd->device, 0x6000);
+                            cmd->device, ANV_AV1_ROWSTORE_IPDL_OFFSET);
 
          ANV_VID_CACHE_INIT(buf, SpatialMotionVectorLineBuffer, cmd->device,
-                            0x2000);
+                            ANV_AV1_ROWSTORE_SMVL_OFFSET);
          ANV_VID_CACHE_INIT(buf, DeblockerFilterLineYBuffer, cmd->device,
-                            0xa000);
+                            ANV_AV1_ROWSTORE_DFLY_OFFSET);
          ANV_VID_CACHE_INIT(buf, DeblockerFilterLineUBuffer, cmd->device,
-                            0x15000);
+                            ANV_AV1_ROWSTORE_DFLU_OFFSET);
          ANV_VID_CACHE_INIT(buf, DeblockerFilterLineVBuffer, cmd->device,
-                            0x18000);
-         ANV_VID_CACHE_INIT(buf, CDEFFilterLineBuffer, cmd->device, 0x1b000);
+                            ANV_AV1_ROWSTORE_DFLV_OFFSET);
+         ANV_VID_CACHE_INIT(buf, CDEFFilterLineBuffer, cmd->device,
+                            ANV_AV1_ROWSTORE_CDEF_OFFSET);
          ANV_VID_MEM_INIT(buf, BitstreamTileLineRowstoreBuffer, cmd->device,
                           vid, ANV_VID_MEM_AV1_BITSTREAM_TILE_LINE_ROWSTORE);
          ANV_VID_MEM_INIT(buf, IntraPredictionTileLineRowstoreBuffer,
@@ -3820,19 +3833,14 @@ anv_av1_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *enc
          /* TODO: super-res and loop-restoration unit size when those tools are enabled */
       }
 
-      uint32_t sb_size = seq_hdr->flags.use_128x128_superblock ? 128 : 64;
-      uint32_t pic_width_in_sb = DIV_ROUND_UP(frame_width, sb_size);
-      uint32_t pic_height_in_sb = DIV_ROUND_UP(frame_height, sb_size);
-
       uint32_t tile_col = tile_idx % num_tile_cols;
       uint32_t tile_row = tile_idx / num_tile_cols;
       uint32_t col_start_sb, row_start_sb, tile_w_sb, tile_h_sb;
       if (!ti || ti->flags.uniform_tile_spacing_flag) {
          /* Uniform spacing: pWidthInSbsMinus1/pHeightInSbsMinus1 may be NULL.
           * Tile size = ceil(pic_in_sb / next_pow2(tiles)) per AV1 5.9.15. */
-         uint32_t cols_pow2 = 1, rows_pow2 = 1;
-         while (cols_pow2 < num_tile_cols) cols_pow2 <<= 1;
-         while (rows_pow2 < num_tile_rows) rows_pow2 <<= 1;
+         uint32_t cols_pow2 = util_next_power_of_two(num_tile_cols);
+         uint32_t rows_pow2 = util_next_power_of_two(num_tile_rows);
          uint32_t tw = DIV_ROUND_UP(pic_width_in_sb, cols_pow2);
          uint32_t th = DIV_ROUND_UP(pic_height_in_sb, rows_pow2);
          col_start_sb = tile_col * tw;
@@ -3869,6 +3877,7 @@ anv_av1_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *enc
          til.NumberofActiveBEPipes = 1;
          til.NumofTileColumnsinFrameMinus1 = num_tile_cols - 1;
          til.NumofTileRowsinFrameMinus1 = num_tile_rows - 1;
+         til.DisableCDFUpdateFlag = pic_info->flags.disable_cdf_update;
          til.DisableFrameContextUpdateFlag =
             pic_info->flags.disable_frame_end_update_cdf ||
             (tile_idx != (ti ? ti->context_update_tile_id : 0));
@@ -4014,18 +4023,17 @@ anv_av1_encode_video(struct anv_cmd_buffer *cmd, const VkVideoEncodeInfoKHR *enc
       }
 
       anv_batch_emit(&cmd->batch, GENX(VDENC_HEVC_VP9_TILE_SLICE_STATE), til) {
-         uint32_t ctb_size = 64;
          bool tile_enable = true;
-         uint32_t tile_w_pix = MIN2(tile_w_sb * ctb_size,
-                                    frame_width - col_start_sb * ctb_size);
-         uint32_t tile_h_pix = MIN2(tile_h_sb * ctb_size,
-                                    frame_height - row_start_sb * ctb_size);
+         uint32_t tile_w_pix = MIN2(tile_w_sb * sb_size,
+                                    frame_width - col_start_sb * sb_size);
+         uint32_t tile_h_pix = MIN2(tile_h_sb * sb_size,
+                                    frame_height - row_start_sb * sb_size);
 
          til.NumParEngine = 0;
          til.TileNumber = tile_idx;
          til.TileRowStoreSelect = 0;
-         til.TileStartCTBX = col_start_sb * ctb_size;
-         til.TileStartCTBY = row_start_sb * ctb_size;
+         til.TileStartCTBX = col_start_sb * sb_size;
+         til.TileStartCTBY = row_start_sb * sb_size;
          til.TileWidth = tile_w_pix - 1;
          til.TileHeight = tile_h_pix - 1;
          til.StreaminOffsetEnable = tile_enable;

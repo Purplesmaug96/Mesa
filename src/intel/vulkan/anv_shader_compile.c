@@ -118,24 +118,41 @@ is_local_invoc_id_used_with_simd32_assumption(nir_intrinsic_instr *subgroup_inv)
          continue;
 
       nir_alu_instr *alu = nir_instr_as_alu(instr);
-      if (alu->op != nir_op_iand)
-         continue;
 
-      /* nir_print_instr(&alu->instr, stderr); */
-      /* fprintf(stderr, "\n"); */
+      switch (alu->op) {
+      case nir_op_iand:
+         for (uint32_t i = 0; i < 2; i++) {
+            if (&alu->src[i].src == src)
+               continue;
 
-      for (uint32_t i = 0; i < 2; i++) {
-         if (&alu->src[i].src == src)
-            continue;
+            if (!nir_src_is_const(alu->src[i].src))
+               continue;
 
-         if (!nir_src_is_const(alu->src[i].src))
-            continue;
+            if (nir_src_as_uint(alu->src[i].src) != 0xffffffe0)
+               continue;
 
-         if (nir_src_as_uint(alu->src[i].src) != 0xffffffe0)
-            continue;
-
-         if (is_alu_used_for_umod_subgroup_size(alu))
+            if (is_alu_used_for_umod_subgroup_size(alu))
+               return true;
+         }
+         break;
+      /* Detect if we have local invocation id divided by BRW_SUBGROUP_SIZE. */
+      case nir_op_ushr:
+         if (alu->src[0].src.ssa == &subgroup_inv->def &&
+             nir_src_is_const(alu->src[1].src) &&
+             nir_src_as_int(alu->src[1].src) == 5) {
             return true;
+         }
+         break;
+      case nir_op_udiv:
+      case nir_op_idiv:
+         if (alu->src[0].src.ssa == &subgroup_inv->def &&
+             nir_src_is_const(alu->src[1].src) &&
+             nir_src_as_int(alu->src[1].src) == 32) {
+            return true;
+         }
+         break;
+      default:
+         break;
       }
    }
 
@@ -212,6 +229,9 @@ anv_shader_init_uuid(struct anv_physical_device *device)
     * output. Mostly it's workarounds, but there is also settings for using
     * indirect descriptors (a different binding model).
     *
+    * shaderBinaryUUID, the pipeline cache UUID and the disk cache id are all
+    * derived from the result, so an option only has to be added here.
+    *
     * The fp64 workaround is skipped because although it changes the
     * compiler's output, not having that workaroung enabled with an app
     * expecting fp64 support will just crash in the backend.
@@ -222,6 +242,11 @@ anv_shader_init_uuid(struct anv_physical_device *device)
    _mesa_blake3_update(&ctx, device->driver_build_sha1,
                        sizeof(device->driver_build_sha1));
    brw_device_blake3_update(&ctx, &device->info);
+
+   /* The disk cache gets this as driver_flags, the UUID doesn't. */
+   const uint64_t compiler_config =
+      brw_get_compiler_config_value(device->compiler);
+   _mesa_blake3_update(&ctx, &compiler_config, sizeof(compiler_config));
 
    const bool always_bindless = device->drirc.features.always_bindless;
    _mesa_blake3_update(&ctx, &always_bindless, sizeof(always_bindless));
@@ -726,6 +751,11 @@ populate_bs_prog_key(struct brw_bs_prog_key *key,
       ray_flags |= BRW_RT_RAY_FLAG_SKIP_TRIANGLES;
    else if (rt_skip_aabbs)
       ray_flags |= BRW_RT_RAY_FLAG_SKIP_AABBS;
+
+   if (INTEL_DEBUG(DEBUG_RT_NO_AHS))
+      ray_flags |= BRW_RT_RAY_FLAG_CULL_NON_OPAQUE;
+   if (INTEL_DEBUG(DEBUG_RT_NO_CHS))
+      ray_flags |= BRW_RT_RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
 
    key->pipeline_ray_flags = ray_flags;
 }
@@ -1566,6 +1596,11 @@ anv_shader_lower_nir(struct anv_device *device,
 
    NIR_PASS(_, nir, nir_opt_remove_phis);
 
+   /* Pre-Xe2 platforms don't have native support for dynamic programmable
+    * offsets. Since support includes non-uniform programmable offsets, we
+    * need to lower those texture messages in the same way we lower
+    * non-uniform texture/sampler handles.
+    */
    const bool lower_non_uniform_texture_offsets = device->info->ver < 20;
 
    const enum nir_lower_non_uniform_access_type lower_non_uniform_access_types =
@@ -1576,14 +1611,6 @@ anv_shader_lower_nir(struct anv_device *device,
       nir_lower_non_uniform_get_ssbo_size |
       (lower_non_uniform_texture_offsets ?
        nir_lower_non_uniform_texture_offset_access : 0);
-
-   /* Pre-Xe2 platforms don't have native support for dynamic programmable
-    * offsets. Since support includes non-uniform programmable offsets, we
-    * need to lower those texture messages in the same way we lower
-    * non-uniform texture/sampler handles.
-    */
-   if (lower_non_uniform_texture_offsets)
-      nir_divergence_analysis(nir);
 
    /* In practice, most shaders do not have non-uniform-qualified
     * accesses (see
@@ -2406,7 +2433,7 @@ anv_shader_compile(struct vk_device *vk_device,
 
       shader_data->prog_data.base.source_hash = shader_data->source_hash;
 
-      if (intel_use_jay(devinfo, nir->info.stage)) {
+      if (intel_use_jay(devinfo, nir)) {
          struct jay_shader_bin *bin =
             anv_shader_compile_jay(devinfo, mem_ctx, nir, params, shader_data);
 

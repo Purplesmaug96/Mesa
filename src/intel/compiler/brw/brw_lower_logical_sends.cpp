@@ -1190,7 +1190,8 @@ setup_lsc_surface_descriptors(const brw_builder &bld, brw_send_inst *send,
    enum lsc_opcode op = lsc_msg_desc_opcode(devinfo, desc);
    enum lsc_addr_surface_type surf_type = lsc_msg_desc_addr_type(devinfo, desc);
 
-   ASSERTED const unsigned max_imm_bits = brw_max_immediate_offset_bits(surf_type, false);
+   ASSERTED const unsigned max_imm_bits = brw_max_immediate_offset_bits(
+      devinfo, surf_type, false, send->sfid == GEN_SFID_SLM);
    assert(base_offset >= u_intN_min(max_imm_bits));
    assert(base_offset <= u_intN_max(max_imm_bits));
 
@@ -1292,7 +1293,8 @@ lower_lsc_memory_logical_send(const brw_builder &bld, brw_mem_inst *mem)
    const bool fused_eu_disable = mem->flags & MEMORY_FLAG_FUSED_EU_DISABLE;
    const bool can_reorder = mem->flags & MEMORY_FLAG_CAN_REORDER;
 
-   const uint32_t data_size_B = lsc_data_size_bytes(data_size);
+   const uint32_t data_size_B = lsc_data_size_register_bytes(data_size);
+   const uint32_t memory_data_size_B = lsc_data_size_memory_bytes(data_size);
    const enum brw_reg_type data_type =
       brw_type_with_size(data0.type, data_size_B * 8);
 
@@ -1443,7 +1445,7 @@ lower_lsc_memory_logical_send(const brw_builder &bld, brw_mem_inst *mem)
        *    "Specified the signed global offset (in number of data size
        *     elements) applied to all addresses in the message"
        */
-      assert(base_offset % data_size_B == 0);
+      assert(base_offset % memory_data_size_B == 0);
       unsigned num_channels_or_cmask = lsc_opcode_has_cmask(op) ?
                                        (1 << components) - 1 :
                                        components;
@@ -1459,7 +1461,7 @@ lower_lsc_memory_logical_send(const brw_builder &bld, brw_mem_inst *mem)
                                                transpose,
                                                cache_mode,
                                                0 /* scale_offset */,
-                                               base_offset / data_size_B,
+                                               base_offset / memory_data_size_B,
                                                surface_index);
       assert(binding_type == LSC_ADDR_SURFTYPE_FLAT || brw_type_size_bits(binding.type) == 64);
       send->src[SENDG_SRC_IND_0_DESC] = binding_type == LSC_ADDR_SURFTYPE_FLAT ?
@@ -1559,7 +1561,7 @@ lower_hdc_memory_logical_send(const brw_builder &bld, brw_mem_inst *mem)
    const uint32_t data_bit_size =
       data_size == LSC_DATA_SIZE_D8U32 ? 8 :
       data_size == LSC_DATA_SIZE_D16U32 ? 16 :
-      8 * lsc_data_size_bytes(data_size);
+      8 * lsc_data_size_register_bytes(data_size);
 
    const bool byte_scattered =
       data_bit_size < 32 || (alignment != 0 && alignment < 4) ||
@@ -1636,7 +1638,7 @@ lower_hdc_memory_logical_send(const brw_builder &bld, brw_mem_inst *mem)
       unsigned payload_size_UDs = (header.file != BAD_FILE ? 1 : 0) +
                                   (addr_size_B / 4) +
                                   (lsc_op_num_data_values(op) * components *
-                                   lsc_data_size_bytes(data_size) / 4);
+                                   lsc_data_size_register_bytes(data_size) / 4);
 
       payload = bld.vgrf(BRW_TYPE_UD, payload_size_UDs);
       brw_inst *load_payload =

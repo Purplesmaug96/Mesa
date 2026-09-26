@@ -140,13 +140,6 @@ struct brw_compiler {
     */
    uint32_t num_lowered_storage_formats;
    uint32_t *lowered_storage_formats;
-
-   /**
-    * Debug flag for forcing minimum number of threads per EU for shader.
-    * Can optionally only apply to shaders matching source hash.
-    */
-   uint32_t threads_per_eu_min;
-   uint64_t threads_per_eu_srchash;
 };
 
 #define brw_shader_debug_log(compiler, data, fmt, ... ) do {    \
@@ -522,6 +515,9 @@ struct brw_stage_prog_data {
    unsigned grf_used;
 
    uint64_t source_hash;
+
+   /* Was this shader compiled with Jay? */
+   bool is_jay;
 };
 
 enum brw_pixel_shader_computed_depth_mode {
@@ -649,23 +645,10 @@ struct brw_fs_prog_data {
    enum intel_sometimes provoking_vertex_last;
 
    /**
-    * If the fragment shader reads FullyCovered, it needs to know what the
-    * state of conservative rasterization is.
-    */
-   enum intel_sometimes conservative_raster;
-
-   /**
     * Push constant location of intel_fs_config (dynamic configuration of the
     * pixel shader) in bytes.
     */
    unsigned fs_config_param;
-
-   /**
-    * Push constant location of the remapping offset in the instruction heap
-    * for Wa_18019110168 in bytes (the value read by the compiler is a
-    * uint16_t).
-    */
-   unsigned per_primitive_remap_param;
 
    /**
     * Mask of which interpolation modes are required by the fragment shader.
@@ -1571,12 +1554,25 @@ enum brw_topology_id
 
 static inline unsigned
 intel_vrt_register_file_size(const struct intel_device_info *devinfo,
+                             uint64_t source_hash,
                              unsigned size)
 {
    if (devinfo->ver < 30)
       return 128;
 
-   return MIN2(align(size, size > 192 ? 64 : 32), 256);
+   unsigned vrt_size = MIN2(align(size, size > 192 ? 64 : 32), 256);
+
+   if (unlikely(intel_threads_per_eu_min != (uint32_t)-1)) {
+      if (intel_threads_per_eu_srchash == BRW_SRCHASH_EMPTY ||
+          intel_threads_per_eu_srchash == source_hash) {
+         fprintf(stderr,
+                 "INTEL_THREADS_PER_EU: min=%u for src_hash=0x%" PRIx64 "\n",
+                 intel_threads_per_eu_min, source_hash);
+         vrt_size = MIN2(vrt_size, ROUND_DOWN_TO(1024 / intel_threads_per_eu_min, 32));
+      }
+   }
+
+   return vrt_size;
 }
 
 static inline unsigned

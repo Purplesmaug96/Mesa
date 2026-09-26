@@ -1201,10 +1201,6 @@ visit_tex(nir_tex_instr *instr, struct divergence_state *state)
          is_divergent |= src_divergent(instr->src[i].src, state) &&
                          instr->texture_non_uniform;
          break;
-      case nir_tex_src_offset:
-         instr->offset_non_uniform = src_divergent(instr->src[i].src, state);
-         is_divergent |= instr->offset_non_uniform;
-         break;
       default:
          is_divergent |= src_divergent(instr->src[i].src, state);
          break;
@@ -1262,6 +1258,20 @@ nir_variable_is_uniform(nir_shader *shader, nir_variable *var,
       if (var->data.location == SYSTEM_VALUE_INSTANCE_INDEX) {
          assert(fake_instr.intrinsic == nir_num_intrinsics);
          fake_instr.intrinsic = nir_intrinsic_load_instance_id;
+      }
+
+      if (var->data.location == SYSTEM_VALUE_DEVICE_INDEX) {
+         assert(fake_instr.intrinsic == nir_num_intrinsics);
+         return true;
+      }
+
+      /* There are several possible choices for these values, but, from the
+       * perspective of divergence, they're all the same.
+       */
+      if (var->data.location == SYSTEM_VALUE_BARYCENTRIC_LINEAR_COORD ||
+          var->data.location == SYSTEM_VALUE_BARYCENTRIC_PERSP_COORD) {
+         assert(fake_instr.intrinsic == nir_num_intrinsics);
+         fake_instr.intrinsic = nir_intrinsic_load_barycentric_coord_sample;
       }
 
       assert(fake_instr.intrinsic != nir_num_intrinsics);

@@ -1,9 +1,15 @@
+// Copyright © 2026 Collabora, Ltd.
+// SPDX-License-Identifier: MIT
+
+// This is primarily used by tests so some of it is dead
+#![allow(dead_code)]
+
 use std::iter;
 
 use compiler::float16::F16;
 use compiler::smallvec::SmallVec;
+use mesa_util::bitview::{BitMutViewable, BitViewable};
 
-use crate::bitview::{BitMutViewable, BitViewable};
 use crate::ir::*;
 
 pub trait FoldDataView {

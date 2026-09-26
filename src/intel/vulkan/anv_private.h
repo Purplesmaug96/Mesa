@@ -1689,8 +1689,13 @@ struct anv_physical_device {
     struct anv_memregion                        vram_non_mappable;
     struct anv_memregion                        sys;
     uint8_t                                     driver_build_sha1[BLAKE3_KEY_LEN];
+    /** Hash of everything that changes the compiler's output
+     *
+     * We report this for both shaderBinaryUUID and pipelineCacheUUID, and the
+     * disk cache id is the same bytes in hex. The list of what goes in is in
+     * anv_shader_init_uuid().
+     */
     uint8_t                                     shader_binary_uuid[VK_UUID_SIZE];
-    uint8_t                                     pipeline_cache_uuid[VK_UUID_SIZE];
     uint8_t                                     driver_uuid[VK_UUID_SIZE];
     uint8_t                                     device_uuid[VK_UUID_SIZE];
     uint8_t                                     rt_uuid[VK_UUID_SIZE];
@@ -4262,7 +4267,7 @@ enum anv_query_bits {
  * there is no tile cache.
  */
 #define ANV_DEVINFO_HAS_COHERENT_L3_CS(devinfo) \
-   (intel_device_info_is_dg2(devinfo))
+   (intel_device_info_is_dg2(devinfo) || (devinfo)->ver >= 20)
 
 /* Things we need to flush before accessing query data using the command
  * streamer.
@@ -4284,18 +4289,6 @@ enum anv_query_bits {
 #define ANV_QUERY_COMPUTE_WRITES_PENDING_BITS \
    (ANV_QUERY_WRITES_DATA_FLUSH | \
     ANV_QUERY_WRITES_CS_STALL)
-
-#define ANV_PIPE_QUERY_BITS(pending_query_bits) ( \
-   ((pending_query_bits & ANV_QUERY_WRITES_RT_FLUSH) ?   \
-    ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT : 0) | \
-   ((pending_query_bits & ANV_QUERY_WRITES_TILE_FLUSH) ?   \
-    ANV_PIPE_TILE_CACHE_FLUSH_BIT : 0) | \
-   ((pending_query_bits & ANV_QUERY_WRITES_CS_STALL) ?   \
-    ANV_PIPE_CS_STALL_BIT : 0) | \
-   ((pending_query_bits & ANV_QUERY_WRITES_DATA_FLUSH) ?  \
-    (ANV_PIPE_DATA_CACHE_FLUSH_BIT | \
-     ANV_PIPE_HDC_PIPELINE_FLUSH_BIT | \
-     ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT) : 0))
 
 #define ANV_PIPE_FLUSH_BITS ( \
    ANV_PIPE_DEPTH_CACHE_FLUSH_BIT | \
@@ -4858,22 +4851,35 @@ struct anv_cmd_state {
 
    struct {
       /**
-       * Tracks operations susceptible to interfere with queries in the
-       * destination buffer of vkCmdCopyQueryResults, we need those operations to
-       * have completed before we do the work of vkCmdCopyQueryResults.
+       * Tracks synchronization bits that will need to be flushed before doing
+       * work in vkCmdCopyQueryResults.
        */
-      enum anv_query_bits                          buffer_write_bits;
+      enum anv_pipe_bits                        buffer_write_bits;
 
       /**
-       * Tracks clear operations of query buffers that can interact with
-       * vkCmdQueryBegin*, vkCmdWriteTimestamp*,
+       * Tracks query pool clear synchronization bits that will need to be
+       * flushed before doing work in vkCmdQueryBegin*, vkCmdWriteTimestamp*,
        * vkCmdWriteAccelerationStructuresPropertiesKHR, etc...
        *
        * We need the clearing of the buffer completed before with write data with
        * the command streamer or a shader.
        */
-      enum anv_query_bits                          clear_bits;
+      enum anv_pipe_bits                        clear_bits;
    } queries;
+
+   /**
+    * Tracks whether MI commands accessing indirect data need to emit a CS
+    * stall before being executed (Gfx20+ only).
+    *
+    * We can skip the CS_STALL if the indirect data is not loaded from MI
+    * commands but instead using EXECUTE_INDIRECT_(DRAW|DISPATCH).
+    * Unfortunately the HW does not generate a gl_DrawID value for the shaders
+    * so if a shader uses gl_DrawID, we have to generate it in software,
+    * preventing the use of EXECUTE_INDIRECT_DRAW. In such cases we might
+    * fallback to MI commands to load the indirect parameters and we need a
+    * CS_STALL.
+    */
+   bool                                         mi_indirect_data_needs_cs_stall;
 
    /** Tracks whether 3DSTATE_BINDING_TABLE_POINTERS_* instructions need
     * emissions
@@ -5392,6 +5398,43 @@ void
 anv_cmd_buffer_update_pending_query_bits(struct anv_cmd_buffer *cmd_buffer,
                                          enum anv_pipe_bits flushed_bits);
 
+static inline bool
+anv_cmd_buffer_blorp_uses_compute(const struct anv_cmd_buffer *cmd_buffer)
+{
+   if (anv_cmd_buffer_is_compute_queue(cmd_buffer))
+      return true;
+   if (!anv_cmd_buffer_is_render_queue(cmd_buffer))
+      return false;
+   return cmd_buffer->device->info->ver < 20 &&
+      cmd_buffer->state.current_pipeline == cmd_buffer->device->physical->gpgpu_pipeline_value;
+}
+
+static inline enum anv_pipe_bits
+anv_cmd_buffer_shader_query_sync_bits(const struct anv_cmd_buffer *cmd_buffer)
+{
+   const struct anv_device *device = cmd_buffer->device;
+   /* Xe2+ always uses the 3D pipeline for clearing
+    *
+    * Pre-Xe2, the clearing writes are in compute if we're in gpgpu mode on
+    * the render engine or on the compute engine.
+    */
+   const bool op_uses_compute = anv_cmd_buffer_blorp_uses_compute(cmd_buffer);
+
+   enum anv_pipe_bits bits = ANV_PIPE_CS_STALL_BIT;
+   if (op_uses_compute) {
+      bits |= device->info->ver > 12 ?
+         (ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT | ANV_PIPE_HDC_PIPELINE_FLUSH_BIT) :
+         ANV_PIPE_DATA_CACHE_FLUSH_BIT;
+   } else {
+      bits |= ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT;
+   }
+
+   if (!ANV_DEVINFO_HAS_COHERENT_L3_CS(device->info))
+      bits |= op_uses_compute ? ANV_PIPE_DATA_CACHE_FLUSH_BIT : ANV_PIPE_TILE_CACHE_FLUSH_BIT;
+
+   return bits;
+}
+
 void
 anv_cmd_buffer_bind_shaders(struct vk_command_buffer *cmd_buffer,
                             uint32_t stage_count,
@@ -5590,19 +5633,6 @@ anv_shader_internal_get_pointer(const struct anv_device *device,
       (device->physical->va.shader_heap.addr + shader->kernel.offset) :
       shader->kernel.offset;
 }
-
-struct anv_pipeline_executable {
-   mesa_shader_stage stage;
-
-   struct genisa_stats stats;
-
-   char *nir;
-   char *disasm;
-};
-
-enum anv_pipeline_type {
-   ANV_PIPELINE_RAY_TRACING,
-};
 
 void anv_shader_init_uuid(struct anv_physical_device *device);
 
@@ -6993,6 +7023,15 @@ struct anv_vid_mem {
 #define ANV_VP9_SEG_PROBS_OFFSET 2010
 #define ANV_VP9_EXEC_STATE_LFT_OFFSET 0
 
+#define ANV_AV1_ROWSTORE_CACHE_LINE 64
+#define ANV_AV1_ROWSTORE_BTDL_OFFSET (0    * ANV_AV1_ROWSTORE_CACHE_LINE)
+#define ANV_AV1_ROWSTORE_SMVL_OFFSET (128  * ANV_AV1_ROWSTORE_CACHE_LINE)
+#define ANV_AV1_ROWSTORE_IPDL_OFFSET (384  * ANV_AV1_ROWSTORE_CACHE_LINE)
+#define ANV_AV1_ROWSTORE_DFLY_OFFSET (640  * ANV_AV1_ROWSTORE_CACHE_LINE)
+#define ANV_AV1_ROWSTORE_DFLU_OFFSET (1344 * ANV_AV1_ROWSTORE_CACHE_LINE)
+#define ANV_AV1_ROWSTORE_DFLV_OFFSET (1536 * ANV_AV1_ROWSTORE_CACHE_LINE)
+#define ANV_AV1_ROWSTORE_CDEF_OFFSET (1728 * ANV_AV1_ROWSTORE_CACHE_LINE)
+
 enum anv_vid_mem_h264_types {
    ANV_VID_MEM_H264_INTRA_ROW_STORE,
    ANV_VID_MEM_H264_DEBLOCK_FILTER_ROW_STORE,
@@ -7156,6 +7195,8 @@ struct anv_video_session {
    /* Mask for copying seg probs each frame context */
    BITSET_DECLARE(copy_seg_probs, 4);
 };
+
+int32_t anv_av1_relative_dist(int32_t m, int32_t a, int32_t b);
 
 void anv_init_av1_cdf_tables(struct anv_cmd_buffer *cmd,
                              struct anv_video_session *vid);

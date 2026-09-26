@@ -365,6 +365,7 @@ iris_init_screen_caps(struct iris_screen *screen)
    caps->alpha_to_coverage_dither_control = true;
    caps->map_unsynchronized_thread_safe = true;
    caps->has_const_bw = true;
+   caps->polygon_stipple = true;
    caps->cl_gl_sharing = true;
    caps->uma = iris_bufmgr_vram_size(screen->bufmgr) == 0;
    caps->query_memory_info = iris_bufmgr_vram_size(screen->bufmgr) != 0;
@@ -523,6 +524,14 @@ iris_get_timestamp(struct pipe_screen *pscreen)
    result = intel_device_info_timebase_scale(screen->devinfo, result);
 
    return result;
+}
+
+static uint64_t
+iris_convert_timestamp(struct pipe_screen *pscreen, uint64_t raw_timestamp)
+{
+   struct iris_screen *screen = (struct iris_screen *) pscreen;
+
+   return intel_device_info_timebase_scale(screen->devinfo, raw_timestamp);
 }
 
 void
@@ -799,6 +808,7 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    pscreen->is_format_supported = iris_is_format_supported;
    pscreen->context_create = iris_create_context;
    pscreen->get_timestamp = iris_get_timestamp;
+   pscreen->convert_timestamp = iris_convert_timestamp;
    pscreen->query_memory_info = iris_query_memory_info;
    pscreen->get_driver_query_group_info = iris_get_monitor_group_info;
    pscreen->get_driver_query_info = iris_get_monitor_info;

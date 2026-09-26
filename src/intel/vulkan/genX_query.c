@@ -886,17 +886,7 @@ void genX(CmdResetQueryPool)(
                                anv_query_address(pool, firstQuery),
                                queryCount * pool->stride, 0);
 
-      /* The pending clearing writes are in compute if we're in gpgpu mode on
-       * the render engine or on the compute engine.
-       */
-      if (anv_cmd_buffer_is_compute_queue(cmd_buffer) ||
-          cmd_buffer->state.current_pipeline == pdevice->gpgpu_pipeline_value) {
-         cmd_buffer->state.queries.clear_bits =
-            ANV_QUERY_COMPUTE_WRITES_PENDING_BITS;
-      } else {
-         cmd_buffer->state.queries.clear_bits =
-            ANV_QUERY_RENDER_TARGET_WRITES_PENDING_BITS(&pdevice->info);
-      }
+      cmd_buffer->state.queries.clear_bits |= anv_cmd_buffer_shader_query_sync_bits(cmd_buffer);
 
       trace_intel_end_query_clear_blorp(&cmd_buffer->trace, queryCount);
       return;
@@ -1109,11 +1099,9 @@ append_query_clear_flush(struct anv_cmd_buffer *cmd_buffer,
       return false;
 
    anv_add_pending_pipe_bits(cmd_buffer,
-                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR,
                              VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                             ANV_PIPE_QUERY_BITS(
-                                cmd_buffer->state.queries.clear_bits),
+                             cmd_buffer->state.queries.clear_bits,
                              reason);
    return true;
 }
@@ -1313,28 +1301,34 @@ void genX(CmdBeginQueryIndexedEXT)(
    }
 
    case VK_QUERY_TYPE_PERFORMANCE_QUERY_INTEL: {
+      bool success = false;
       uint32_t cmds_size = 0;
+      const uint64_t query_pool_gpu_addr = anv_address_physical(anv_query_address(pool, 0));
+      void* query_pool_cpu_addr = query_slot(pool, 0);
       if (intel_perf_metrics_library_get_perf_query_cmds(cmd_buffer->device->physical->perf,
                                                          pool->metrics_library_query_pool,
-                                                         anv_address_physical(query_addr),
-                                                         query_slot(pool, query),
+                                                         query_pool_gpu_addr,
+                                                         query_pool_cpu_addr,
                                                          query,
                                                          cmd_buffer->intel_perf_marker,
                                                          true,
                                                          NULL,
                                                          &cmds_size)) {
-         void* cmds = anv_batch_emit_dwords(&cmd_buffer->batch, cmds_size);
+         assert(cmds_size % 4 == 0);
+         void* cmds = anv_batch_emit_dwords(&cmd_buffer->batch, cmds_size / 4);
 
-         if (cmds)
-            intel_perf_metrics_library_get_perf_query_cmds(cmd_buffer->device->physical->perf,
-                                                           pool->metrics_library_query_pool,
-                                                           anv_address_physical(query_addr),
-                                                           query_slot(pool, query),
-                                                           query,
-                                                           cmd_buffer->intel_perf_marker,
-                                                           true,
-                                                           cmds,
-                                                           &cmds_size);
+         success = cmds && intel_perf_metrics_library_get_perf_query_cmds(cmd_buffer->device->physical->perf,
+                                                                          pool->metrics_library_query_pool,
+                                                                          query_pool_gpu_addr,
+                                                                          query_pool_cpu_addr,
+                                                                          query,
+                                                                          cmd_buffer->intel_perf_marker,
+                                                                          true,
+                                                                          cmds,
+                                                                          &cmds_size);
+
+         if (!success)
+            anv_batch_set_error(&cmd_buffer->batch, VK_ERROR_OUT_OF_HOST_MEMORY);
       }
       break;
    }
@@ -1531,28 +1525,34 @@ void genX(CmdEndQueryIndexedEXT)(
    }
 
    case VK_QUERY_TYPE_PERFORMANCE_QUERY_INTEL: {
+      bool success = false;
       uint32_t cmds_size = 0;
+      const uint64_t query_pool_gpu_addr = anv_address_physical(anv_query_address(pool, 0));
+      void* query_pool_cpu_addr = query_slot(pool, 0);
       if (intel_perf_metrics_library_get_perf_query_cmds(cmd_buffer->device->physical->perf,
                                                          pool->metrics_library_query_pool,
-                                                         anv_address_physical(query_addr),
-                                                         query_slot(pool, query),
+                                                         query_pool_gpu_addr,
+                                                         query_pool_cpu_addr,
                                                          query,
                                                          cmd_buffer->intel_perf_marker,
                                                          false,
                                                          NULL,
                                                          &cmds_size)) {
-         void* cmds = anv_batch_emit_dwords(&cmd_buffer->batch, cmds_size);
+         assert(cmds_size % 4 == 0);
+         void* cmds = anv_batch_emit_dwords(&cmd_buffer->batch, cmds_size / 4);
 
-         if (cmds)
-            intel_perf_metrics_library_get_perf_query_cmds(cmd_buffer->device->physical->perf,
-                                                           pool->metrics_library_query_pool,
-                                                           anv_address_physical(query_addr),
-                                                           query_slot(pool, query),
-                                                           query,
-                                                           cmd_buffer->intel_perf_marker,
-                                                           false,
-                                                           cmds,
-                                                           &cmds_size);
+         success = cmds && intel_perf_metrics_library_get_perf_query_cmds(cmd_buffer->device->physical->perf,
+                                                                          pool->metrics_library_query_pool,
+                                                                          query_pool_gpu_addr,
+                                                                          query_pool_cpu_addr,
+                                                                          query,
+                                                                          cmd_buffer->intel_perf_marker,
+                                                                          false,
+                                                                          cmds,
+                                                                          &cmds_size);
+
+         if (!success)
+            anv_batch_set_error(&cmd_buffer->batch, VK_ERROR_OUT_OF_HOST_MEMORY);
       }
       break;
    }
@@ -1773,20 +1773,11 @@ copy_query_results_with_cs(struct anv_cmd_buffer *cmd_buffer,
                            uint32_t query_count,
                            VkQueryResultFlags flags)
 {
-   enum anv_pipe_bits needed_flushes = 0;
-
-   trace_intel_begin_query_copy_cs(&cmd_buffer->trace);
-
-   /* If render target writes are ongoing, request a render target cache flush
-    * to ensure proper ordering of the commands from the 3d pipe and the
-    * command streamer.
-    */
-
-   const enum anv_query_bits query_bits =
+   enum anv_pipe_bits needed_flushes =
       cmd_buffer->state.queries.buffer_write_bits |
       cmd_buffer->state.queries.clear_bits;
 
-   needed_flushes |= ANV_PIPE_QUERY_BITS(query_bits);
+   trace_intel_begin_query_copy_cs(&cmd_buffer->trace);
 
    /* Occlusion & timestamp queries are written using a PIPE_CONTROL and
     * because we're about to copy values from MI commands, we need to stall
@@ -1934,24 +1925,29 @@ copy_query_results_with_shader(struct anv_cmd_buffer *cmd_buffer,
     * consistent pipeline mode.
     */
    if (cmd_buffer->state.current_pipeline == UINT32_MAX) {
-      if (anv_cmd_buffer_is_render_queue(cmd_buffer))
-         genX(flush_pipeline_select_3d)(cmd_buffer);
-      else
+      if (anv_cmd_buffer_blorp_uses_compute(cmd_buffer))
          genX(flush_pipeline_select_gpgpu)(cmd_buffer, false);
+      else
+         genX(flush_pipeline_select_3d)(cmd_buffer);
    }
 
+#if GFX_VER >= 20
+   /* On Gfx20+ there is no pipeline switching cost and we run everything on the 3D engine */
+   if (anv_cmd_buffer_is_render_queue(cmd_buffer))
+      genX(flush_pipeline_select_3d)(cmd_buffer);
+#endif
+
    if ((cmd_buffer->state.queries.buffer_write_bits |
-        cmd_buffer->state.queries.clear_bits) & ANV_QUERY_WRITES_RT_FLUSH) {
+        cmd_buffer->state.queries.clear_bits) & ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT)
       wait_stages |= VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-      needed_flushes |= ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT;
-   }
-
    if ((cmd_buffer->state.queries.buffer_write_bits |
-        cmd_buffer->state.queries.clear_bits) & ANV_QUERY_WRITES_DATA_FLUSH) {
+        cmd_buffer->state.queries.clear_bits) & (ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT |
+                                                 ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
+                                                 ANV_PIPE_DATA_CACHE_FLUSH_BIT))
       wait_stages |= VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-      needed_flushes |= (ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
-                         ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT);
-   }
+
+   needed_flushes |= cmd_buffer->state.queries.buffer_write_bits |
+                     cmd_buffer->state.queries.clear_bits;
 
    /* Flushes for the queries to complete */
    if (flags & VK_QUERY_RESULT_WAIT_BIT) {
@@ -1989,7 +1985,7 @@ copy_query_results_with_shader(struct anv_cmd_buffer *cmd_buffer,
    VkResult ret =
       anv_device_get_internal_shader(
          cmd_buffer->device,
-         cmd_buffer->state.current_pipeline == GPGPU ?
+         anv_cmd_buffer_blorp_uses_compute(cmd_buffer) ?
          ANV_INTERNAL_KERNEL_COPY_QUERY_RESULTS_COMPUTE :
          ANV_INTERNAL_KERNEL_COPY_QUERY_RESULTS_FRAGMENT,
          &copy_kernel);
@@ -2143,24 +2139,19 @@ genX(CmdWriteAccelerationStructuresPropertiesKHR)(
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    ANV_FROM_HANDLE(anv_query_pool, pool, queryPool);
 
-   /* L1/L2 caches flushes should have been dealt with by pipeline barriers.
-    * Unfortunately some platforms require L3 flush because CS (reading the
-    * dispatch parameters) is not L3 coherent.
+   /* We need a CS stall for the flushing to complete before we run the MI
+    * commands.
+    *
+    * If CS is also non coherent in L3, we need to flush L3.
     */
-   if (!ANV_DEVINFO_HAS_COHERENT_L3_CS(cmd_buffer->device->info)) {
-      anv_add_pending_pipe_bits(cmd_buffer,
-                                VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                ANV_PIPE_END_OF_PIPE_SYNC_BIT |
-                                ANV_PIPE_DATA_CACHE_FLUSH_BIT,
-                                "read BVH data using CS");
-      genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
-   }
-
-   if (append_query_clear_flush(
-          cmd_buffer, pool,
-          "CmdWriteAccelerationStructuresPropertiesKHR flush query clears"))
-      genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+   anv_add_pending_pipe_bits(cmd_buffer,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                             (ANV_DEVINFO_HAS_COHERENT_L3_CS(cmd_buffer->device->info) ? 0 :
+                              ANV_PIPE_DATA_CACHE_FLUSH_BIT) |
+                             ANV_PIPE_CS_STALL_BIT,
+                             "read BVH data using CS");
+   genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 
    struct mi_builder b;
    mi_builder_init(&b, cmd_buffer->device->info, &cmd_buffer->batch);

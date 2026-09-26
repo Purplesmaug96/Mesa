@@ -85,11 +85,21 @@ static uint64_t etna_resource_modifier(struct etna_resource *rsc)
    return layout_to_modifier(rsc->layout);
 }
 
+bool
+etna_resource_needs_rb_swap(const struct etna_screen *screen,
+                            const struct etna_resource *rsc)
+{
+   return rsc->shared && translate_pe_format_rb_swap(rsc->base.format, screen);
+}
+
 static bool
 etna_resource_is_render_compatible(struct pipe_screen *pscreen,
                                    struct etna_resource *rsc)
 {
    struct etna_screen *screen = etna_screen(pscreen);
+
+   if (etna_resource_needs_rb_swap(screen, rsc))
+      return false;
 
    if (rsc->layout == ETNA_LAYOUT_LINEAR) {
       if (!VIV_FEATURE(screen, ETNA_FEATURE_LINEAR_PE))
@@ -259,6 +269,7 @@ etna_screen_resource_alloc_ts(struct pipe_screen *pscreen,
       close(handle.handle);
    } else {
       rsc->ts_bo = etna_bo_new(screen->dev, ts_bo_size, DRM_ETNA_GEM_CACHE_WC);
+      lvl->ts_needs_clear = true;
    }
 
    if (unlikely(!rsc->ts_bo)) {
@@ -620,16 +631,18 @@ static const uint64_t priority_to_modifier[] = {
 
 static uint64_t
 select_best_modifier(const struct etna_screen * screen,
+                     const struct pipe_resource *templat,
                      const uint64_t *modifiers, const unsigned count)
 {
+   bool can_supertile = screen->specs.can_supertile &&
+                        etna_resource_hw_tileable(screen->specs.use_blt, templat);
    enum modifier_priority prio = MODIFIER_PRIORITY_INVALID;
    uint64_t best_modifier, base_modifier;
 
    for (int i = 0; i < count; i++) {
       switch (modifiers[i] & ~VIVANTE_MOD_EXT_MASK) {
       case DRM_FORMAT_MOD_VIVANTE_SUPER_TILED:
-         if ((screen->specs.pe_multitiled) ||
-             !screen->specs.can_supertile)
+         if ((screen->specs.pe_multitiled) || !can_supertile)
             break;
          prio = MAX2(prio, MODIFIER_PRIORITY_SUPER_TILED);
          break;
@@ -639,7 +652,7 @@ select_best_modifier(const struct etna_screen * screen,
          prio = MAX2(prio, MODIFIER_PRIORITY_TILED);
          break;
       case DRM_FORMAT_MOD_VIVANTE_SPLIT_SUPER_TILED:
-         if ((screen->specs.pixel_pipes < 2) || !screen->specs.can_supertile)
+         if ((screen->specs.pixel_pipes < 2) || !can_supertile)
             break;
          prio = MAX2(prio, MODIFIER_PRIORITY_SPLIT_SUPER_TILED);
          break;
@@ -696,7 +709,7 @@ etna_resource_create_modifiers(struct pipe_screen *pscreen,
 {
    struct etna_screen *screen = etna_screen(pscreen);
    struct pipe_resource tmpl = *templat;
-   uint64_t modifier = select_best_modifier(screen, modifiers, count);
+   uint64_t modifier = select_best_modifier(screen, templat, modifiers, count);
 
    if (modifier == DRM_FORMAT_MOD_INVALID)
       return NULL;
@@ -946,6 +959,7 @@ etna_resource_get_handle(struct pipe_screen *pscreen,
     * when the PE renders to this resource. */
    rsc->shared = true;
    rsc->shared_native_order = true;
+   rsc->render_compatible = etna_resource_is_render_compatible(pscreen, rsc);
 
    if (!(usage & PIPE_HANDLE_USAGE_EXPLICIT_FLUSH))
       rsc->explicit_flush = false;

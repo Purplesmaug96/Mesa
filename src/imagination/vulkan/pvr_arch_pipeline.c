@@ -49,7 +49,6 @@
 #include "pvr_macros.h"
 #include "pvr_nir_lower_ycbcr.h"
 #include "pvr_pass.h"
-#include "pvr_pds.h"
 #include "pvr_physical_device.h"
 #include "pvr_robustness.h"
 #include "pvr_sampler.h"
@@ -2793,6 +2792,9 @@ static void pvr_early_init_shader_data(pco_data *data,
 
    data->common.image_2d_view_of_3d =
       device->vk.enabled_features.image2DViewOf3D;
+
+   data->common.image_sliced_view_of_3d =
+      device->vk.enabled_features.imageSlicedViewOf3D;
 
    switch (nir->info.stage) {
    case MESA_SHADER_VERTEX:

@@ -24,6 +24,7 @@
 
 #include "util/mesa-blake3.h"
 
+#include "ds/pvr_driver_ds.h"
 #include "pvr_bo.h"
 #include "pvr_common.h"
 #include "pvr_macros.h"
@@ -142,10 +143,18 @@ struct pvr_device {
 
    struct vk_sync *presignaled_sync;
 
+   struct {
+      struct pvr_bo *zero_bo;
+      struct pvr_bo *null_bo;
+   } null_state;
+
    struct pvr_border_color_table *border_color_table;
 
    simple_mtx_t rs_mtx;
    struct list_head render_states;
+
+   /* Data Source for GPU tracing */
+   struct pvr_ds_device ds;
 };
 
 struct pvr_device_memory {

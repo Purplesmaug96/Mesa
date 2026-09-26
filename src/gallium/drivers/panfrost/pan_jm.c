@@ -117,17 +117,7 @@ jm_submit_jc(struct panfrost_batch *batch, uint64_t first_job_desc,
 
       assert(submit.bo_handle_count < batch->num_bos);
       bo_handles[submit.bo_handle_count++] = i;
-
-      /* Update the BO access flags so that panfrost_bo_wait() knows
-       * about all pending accesses.
-       * We only keep the READ/WRITE info since this is all the BO
-       * wait logic cares about.
-       * We also preserve existing flags as this batch might not
-       * be the first one to access the BO.
-       */
-      struct panfrost_bo *bo = pan_lookup_bo(dev, i);
-
-      bo->gpu_access |= flags[i] & (PAN_BO_ACCESS_RW);
+      panfrost_context_report_bo_access(ctx, pan_lookup_bo(dev, i), flags[i]);
    }
 
    panfrost_pool_get_bo_handles(&batch->pool,
@@ -554,7 +544,7 @@ jm_emit_tiler_draw(struct mali_draw_packed *out, struct panfrost_batch *batch,
          struct panfrost_resource *rsrc =
             pan_resource(ctx->occlusion_query->rsrc);
          cfg.occlusion = rsrc->plane.base;
-         panfrost_batch_write_rsrc(ctx->batch, rsrc, MESA_SHADER_FRAGMENT);
+         panfrost_batch_write_rsrc(ctx->batch, rsrc);
       }
 
 #if PAN_ARCH >= 9
@@ -1104,7 +1094,7 @@ GENX(jm_emit_write_timestamp)(struct panfrost_batch *batch,
 
    pan_jc_add_job(&batch->jm.jobs.vtc_jc, MALI_JOB_TYPE_WRITE_VALUE, false,
                   false, 0, 0, &job, false);
-   panfrost_batch_write_rsrc(batch, dst, MESA_SHADER_VERTEX);
+   panfrost_batch_write_rsrc(batch, dst);
 }
 
 int
@@ -1148,10 +1138,22 @@ GENX(jm_cleanup_context)(struct panfrost_context *ctx)
 {
    PAN_TRACE_FUNC(PAN_TRACE_GL_JM);
 
-   if (!ctx->jm.handle)
-      return;
-
    struct panfrost_device *dev = pan_device(ctx->base.screen);
+
+   if (!ctx->jm.handle) {
+      /* Without an explicit JM context, nothing kills the jobs this context
+       * still has in flight, and they point at memory that is in no job's BO
+       * list -- the screen-wide shader and descriptor pools -- so nothing in
+       * the kernel keeps it alive either. An application that tears down
+       * without a glFinish() would have it released under the GPU, and every
+       * job still queued would fault and hit the scheduler timeout. The
+       * context syncobj is the out-fence of the last job submitted.
+       */
+      drmSyncobjWait(panfrost_device_fd(dev), &ctx->syncobj, 1, INT64_MAX, 0,
+                     NULL);
+      return;
+   }
+
    struct drm_panfrost_jm_ctx_destroy args = {
       .handle = ctx->jm.handle,
    };

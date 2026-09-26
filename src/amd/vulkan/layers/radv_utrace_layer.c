@@ -93,9 +93,9 @@ radv_utrace_write_timestamp(struct u_trace *ut, void *cs, void *timestamps, uint
       radv_suspend_conditional_rendering(cmd_buffer);
 
    cmd_buffer->state.flush_bits |=
-      RADV_CMD_FLAG_VS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH | RADV_CMD_FLAG_CS_PARTIAL_FLUSH;
+      AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS;
 
-   radv_emit_cache_flush(cmd_buffer);
+   radv_emit_cache_flush(cmd_buffer, false);
 
    ASSERTED unsigned cdw_max = radeon_check_space(device->ws, cmd_buffer->cs->b, 28);
    /* TODO: Figure out why ace timestamps don't always complete. */

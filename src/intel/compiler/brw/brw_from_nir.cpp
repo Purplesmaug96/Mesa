@@ -1509,27 +1509,10 @@ brw_from_nir_emit_alu(nir_to_brw_state &ntb, nir_alu_instr *instr,
       bld.LZD(retype(result, BRW_TYPE_UD), op[0]);
       break;
 
-   case nir_op_ifind_msb: {
-      assert(instr->def.bit_size == 32);
-      assert(nir_src_bit_size(instr->src[0].src) == 32);
-
-      brw_reg tmp = bld.FBH(retype(op[0], BRW_TYPE_D));
-
-      /* FBH counts from the MSB side, while GLSL's findMSB() wants the count
-       * from the LSB side. If FBH didn't return an error (0xFFFFFFFF), then
-       * subtract the result from 31 to convert the MSB count into an LSB
-       * count.
-       */
-      brw_reg count_from_lsb = bld.ADD(negate(tmp), brw_imm_w(31));
-
-      /* The high word of the FBH result will be 0xffff or 0x0000. After
-       * calculating 31 - fbh, we can obtain the correct result for
-       * ifind_msb(0) by ORing the (sign extended) upper word of the
-       * intermediate result.
-       */
-      bld.OR(result, count_from_lsb, subscript(tmp, BRW_TYPE_W, 1));
+   case nir_op_ifind_msb_rev:
+   case nir_op_ufind_msb_rev:
+      bld.FBH(result, op[0]);
       break;
-   }
 
    case nir_op_find_lsb:
       assert(instr->def.bit_size == 32);
@@ -3748,7 +3731,7 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
    case nir_intrinsic_terminate_if: {
       /* We track our discarded pixels in f0.1/f1.0.  By predicating on it, we
        * can update just the flag bits that aren't yet discarded.  If there's
-       * no condition, we emit a CMP of g0 != g0, so all currently executing
+       * no condition, we emit 'MOV.NZ null, 0', so all currently executing
        * channels will get turned off.
        */
       brw_inst *cmp = NULL;
@@ -3814,8 +3797,16 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
                           brw_imm_d(0), BRW_CONDITIONAL_Z);
          }
       } else {
-         brw_reg some_reg = brw_reg(retype(brw_vec8_grf(0, 0), BRW_TYPE_UW));
-         cmp = bld.CMP(bld.null_reg_f(), some_reg, some_reg, BRW_CONDITIONAL_NZ);
+         cmp = bld.MOV(retype(brw_null_reg(), BRW_TYPE_UW), brw_imm_uw(0));
+         cmp->conditional_mod = BRW_CONDITIONAL_NZ;
+      }
+
+      if (instr->intrinsic == nir_intrinsic_terminate_if) {
+         brw_inst *iff = bld.IF(BRW_PREDICATE_NORMAL);
+         iff->predicate_inverse = true;
+
+         cmp = bld.MOV(retype(brw_null_reg(), BRW_TYPE_UW), brw_imm_uw(0));
+         cmp->conditional_mod = BRW_CONDITIONAL_NZ;
       }
 
       cmp->predicate = BRW_PREDICATE_NORMAL;
@@ -3835,6 +3826,10 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
          jump->predicate = (devinfo->ver >= 20 ? XE2_PREDICATE_ANY :
                             BRW_PREDICATE_ALIGN1_ANY4H);
       }
+
+      if (instr->intrinsic == nir_intrinsic_terminate_if)
+         bld.emit(BRW_OPCODE_ENDIF);
+
       break;
    }
 
@@ -4135,6 +4130,7 @@ memory_address(nir_to_brw_state &ntb,
       bld.scalar_group() : bld;
    brw_reg address;
    const uint32_t element_size_B = brw_nir_intrinsic_data_element_size(instr);
+   const bool is_slm = nir_is_shared_access(instr);
 
    if ((brw_lsc_supports_base_offset(devinfo) == false) ||
        (!nir_intrinsic_has_base(instr) && !nir_src_is_const(*nir_src_offset))) {
@@ -4146,10 +4142,11 @@ memory_address(nir_to_brw_state &ntb,
       *address_offset = 0;
    } else if (!nir_intrinsic_has_base(instr) && nir_src_is_const(*nir_src_offset)) {
       const int32_t offset = nir_src_as_int(*nir_src_offset);
-      if (brw_lsc_can_use_instruction_offset(binding_type,
+      if (brw_lsc_can_use_instruction_offset(devinfo,
+                                             binding_type,
                                              ntb.s.key->use_efficient_64bit,
                                              element_size_B,
-                                             offset)) {
+                                             offset, is_slm)) {
          address = brw_imm_ud(0);
          *address_offset = offset;
       } else {
@@ -4159,10 +4156,11 @@ memory_address(nir_to_brw_state &ntb,
    } else {
       assert(nir_intrinsic_has_base(instr));
       const int32_t offset = nir_intrinsic_base(instr);
-      assert(brw_lsc_can_use_instruction_offset(binding_type,
+      assert(brw_lsc_can_use_instruction_offset(devinfo,
+                                                binding_type,
                                                 ntb.s.key->use_efficient_64bit,
                                                 element_size_B,
-                                                offset));
+                                                offset, is_slm));
       address = src_offset;
       *address_offset = offset;
    }
@@ -5957,7 +5955,7 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
    const unsigned nir_bit_size =
       is_store ? instr->src[data_src].ssa->bit_size : instr->def.bit_size;
    const enum lsc_data_size data_size = lsc_bits_to_data_size(nir_bit_size);
-   uint32_t data_bit_size = lsc_data_size_bytes(data_size) * 8;
+   uint32_t data_bit_size = lsc_data_size_register_bytes(data_size) * 8;
 
    const brw_reg_type data_type =
       brw_type_with_size(BRW_TYPE_UD, data_bit_size);

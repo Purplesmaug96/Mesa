@@ -389,7 +389,9 @@ brw_compile_task(const struct brw_compiler *compiler,
          if (devinfo->ver >= 30 && !v[simd]->spilled_any_registers)
             break;
       } else {
-         simd_state.error[simd] = ralloc_strdup(params->base.mem_ctx, v[simd]->fail_msg);
+         brw_simd_mark_failed(simd_state, simd,
+                              ralloc_strdup(params->base.mem_ctx,
+                                            v[simd]->fail_msg));
       }
    }
 
@@ -1043,7 +1045,15 @@ brw_compile_mesh(const struct brw_compiler *compiler,
    BRW_NIR_PASS(brw_nir_lower_outputs_to_urb_intrinsics, &cb_data);
 
    struct nir_opt_offsets_options offset_options = {};
-   BRW_NIR_PASS(nir_opt_offsets, &offset_options);
+
+   /* The folding can push the base of load/store_global_intel beyond the
+    * immediate offset limits, so re-run the lowering.
+    */
+   if (BRW_NIR_PASS(nir_opt_offsets, &offset_options) &&
+       brw_lsc_supports_base_offset(devinfo)) {
+      BRW_NIR_PASS(brw_nir_lower_immediate_offsets, devinfo,
+                   pt->key->use_efficient_64bit);
+   }
 
    brw_simd_selection_state simd_state{
       .devinfo = compiler->devinfo,
@@ -1107,7 +1117,9 @@ brw_compile_mesh(const struct brw_compiler *compiler,
          if (devinfo->ver >= 30 && !v[simd]->spilled_any_registers)
             break;
       } else {
-         simd_state.error[simd] = ralloc_strdup(params->base.mem_ctx, v[simd]->fail_msg);
+         brw_simd_mark_failed(simd_state, simd,
+                              ralloc_strdup(params->base.mem_ctx,
+                                            v[simd]->fail_msg));
       }
    }
 

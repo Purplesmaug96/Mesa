@@ -69,6 +69,7 @@ setup_exit_block(jay_builder *b, struct ctx *ctx)
 {
    jay_inst *send = jay_last_inst(jay_last_source_block(b->func));
    if ((send && send->op == JAY_OPCODE_SEND && jay_send_eot(send)) &&
+       !send->simd_split &&
        (jay_is_imm(send->src[0]) && jay_is_imm(send->src[1]))) {
       jay_remove_instruction(send);
       jay_builder_insert(b, send);
@@ -198,7 +199,7 @@ jay_lower_helpers(jay_shader *shader)
 
    /* By ABI with jay_assign_flags, the last flag is used to track helpers */
    assert(shader->helpers_tracked);
-   unsigned helper_flag_no = jay_num_regs(shader, FLAG) - 1;
+   unsigned helper_flag_no = shader->num_regs[FLAG] - 1;
    struct ctx ctx = { .helper_flag = jay_bare_reg(FLAG, helper_flag_no) };
 
    /* Initialize the helper flag sensibly based on the dispatch mask (sr0.2) */

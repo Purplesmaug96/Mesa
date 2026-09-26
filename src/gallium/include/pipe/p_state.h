@@ -1037,6 +1037,10 @@ struct pipe_tensor {
     */
    unsigned dims[4];
    /**
+    * Number of dimensions before normalization to four dimensions.
+    */
+   unsigned rank;
+   /**
     * Scale used to quantize this tensor, per-tensor quantization.
     */
    float scale;
@@ -1057,6 +1061,10 @@ struct pipe_tensor {
     */
    bool is_signed;
    /**
+    * Whether the tensor data is immutable model data.
+    */
+   bool is_constant;
+   /**
     * Whether the tensor is exported from the current ML subgraph.
     */
    bool is_external_output;
@@ -1071,24 +1079,35 @@ enum pipe_ml_operation_type {
    PIPE_ML_OPERATION_TYPE_CONVOLUTION,
    PIPE_ML_OPERATION_TYPE_POOLING,
    PIPE_ML_OPERATION_TYPE_CONCATENATION,
+   PIPE_ML_OPERATION_TYPE_PACK,
    PIPE_ML_OPERATION_TYPE_SPLIT,
+   PIPE_ML_OPERATION_TYPE_UNPACK,
    PIPE_ML_OPERATION_TYPE_PAD,
+   PIPE_ML_OPERATION_TYPE_SCATTER_ND,
    PIPE_ML_OPERATION_TYPE_FULLY_CONNECTED,
+   PIPE_ML_OPERATION_TYPE_BATCH_MATMUL,
    PIPE_ML_OPERATION_TYPE_RESHAPE,
    PIPE_ML_OPERATION_TYPE_RELU,
    PIPE_ML_OPERATION_TYPE_ABSOLUTE,
    PIPE_ML_OPERATION_TYPE_LOGISTIC,
    PIPE_ML_OPERATION_TYPE_TANH,
+   PIPE_ML_OPERATION_TYPE_RSQRT,
    PIPE_ML_OPERATION_TYPE_HSWISH,
    PIPE_ML_OPERATION_TYPE_SUBTRACT,
    PIPE_ML_OPERATION_TYPE_TRANSPOSE,
    PIPE_ML_OPERATION_TYPE_STRIDED_SLICE,
    PIPE_ML_OPERATION_TYPE_RESIZE,
+   PIPE_ML_OPERATION_TYPE_RESIZE_BILINEAR,
+   PIPE_ML_OPERATION_TYPE_ARGMAX,
+   PIPE_ML_OPERATION_TYPE_SPACE_TO_BATCH,
+   PIPE_ML_OPERATION_TYPE_BATCH_TO_SPACE,
    PIPE_ML_OPERATION_TYPE_MUL,
    PIPE_ML_OPERATION_TYPE_LEAKY_RELU,
    PIPE_ML_OPERATION_TYPE_QUANTIZE,
    PIPE_ML_OPERATION_TYPE_MAXIMUM,
    PIPE_ML_OPERATION_TYPE_MINIMUM,
+   PIPE_ML_OPERATION_TYPE_SOFTMAX,
+   PIPE_ML_OPERATION_TYPE_MEAN,
 };
 
 enum pipe_ml_pooling_type {
@@ -1240,6 +1259,12 @@ struct pipe_ml_operation
           * Channel after padding.
           */
          unsigned after_z;
+
+         /**
+          * Fill the padded area with raw zero rather than the output tensor's
+          * quantized zero value.
+          */
+         bool raw_zero;
       } pad;
 
       struct {
@@ -1264,6 +1289,11 @@ struct pipe_ml_operation
           */
          bool relu;
       } add;
+
+      struct {
+         bool adj_x;
+         bool adj_y;
+      } batch_matmul;
 
       struct {
          /**
@@ -1291,6 +1321,24 @@ struct pipe_ml_operation
       } transpose;
 
       struct {
+         bool align_corners;
+         bool half_pixel_centers;
+      } resize_bilinear;
+
+      struct {
+         int axis;
+      } argmax;
+
+      struct {
+         int block_y;
+         int block_x;
+         int before_y;
+         int after_y;
+         int before_x;
+         int after_x;
+      } space_batch;
+
+      struct {
          int begin[4];
          int end[4];
          int strides[4];
@@ -1299,6 +1347,12 @@ struct pipe_ml_operation
       struct {
          float alpha;
       } leakyrelu;
+      struct {
+         float beta;
+      } softmax;
+      struct {
+         unsigned axes;
+      } mean;
    };
 };
 

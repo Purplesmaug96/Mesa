@@ -1785,8 +1785,6 @@ resource_barrier_signal_stage(enum intel_engine_class engine_class,
    if (engine_class == INTEL_ENGINE_CLASS_RENDER) {
       if (vk_stages & (VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT_KHR |
                        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR |
-                       VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT_KHR |
-                       VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR |
                        VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT_KHR |
                        VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT_KHR |
                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR |
@@ -1836,7 +1834,8 @@ resource_barrier_signal_stage(enum intel_engine_class engine_class,
                     VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT_KHR |
                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR |
                     VK_PIPELINE_STAGE_2_COPY_BIT_KHR |
-                    VK_PIPELINE_STAGE_2_CLEAR_BIT_KHR)) {
+                    VK_PIPELINE_STAGE_2_CLEAR_BIT_KHR |
+                    VK_PIPELINE_STAGE_2_COPY_INDIRECT_BIT_KHR)) {
       if (engine_class == INTEL_ENGINE_CLASS_RENDER) {
          hw_stages |= RESOURCE_BARRIER_STAGE_COLOR |
                       RESOURCE_BARRIER_STAGE_GPGPU;
@@ -1907,7 +1906,8 @@ resource_barrier_wait_stage(enum intel_engine_class engine_class,
                     VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
                     VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT |
                     VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT |
-                    VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT))
+                    VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT |
+                    VK_PIPELINE_STAGE_2_COPY_INDIRECT_BIT_KHR))
       hw_stage = RESOURCE_BARRIER_STAGE_TOP;
    else if (vk_stages & (VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT_KHR |
                          VK_PIPELINE_STAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR))
@@ -2512,6 +2512,8 @@ genX(cmd_buffer_apply_pipe_flushes)(struct anv_cmd_buffer *cmd_buffer)
                                     ANV_NULL_ADDRESS, ANV_NULL_ADDRESS,
                                     &emitted_bits);
    anv_cmd_buffer_update_pending_query_bits(cmd_buffer, emitted_bits);
+   if (emitted_bits & ANV_PIPE_CS_STALL_BIT)
+      cmd_buffer->state.mi_indirect_data_needs_cs_stall = false;
 
 #if INTEL_WA_1508744258_GFX_VER || INTEL_WA_14024015672_GFX_VER
    if (rhwo_opt_change) {
@@ -3780,7 +3782,10 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
        *    clear pass, to ensure correct ordering between pixels.
        */
       add_pending_pipe_bits_for_color_aux_op(
-         cmd_buffer, next_aux_op, ANV_PIPE_RT_BTI_CHANGE,
+         cmd_buffer, next_aux_op,
+         cmd_buffer->device->physical->rt_change_needs_flush ?
+         ANV_PIPE_RT_BTI_CHANGE :
+         ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT,
          "aux color !fast-clear->fast-clear");
 
 #elif GFX_VERx10 == 125
@@ -3875,7 +3880,10 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
        *    RT flush = 1
        */
       add_pending_pipe_bits_for_color_aux_op(
-         cmd_buffer, next_aux_op, ANV_PIPE_RT_BTI_CHANGE,
+         cmd_buffer, next_aux_op,
+         cmd_buffer->device->physical->rt_change_needs_flush ?
+         ANV_PIPE_RT_BTI_CHANGE :
+         ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT,
          "aux color fast-clear->!fast-clear");
 
 #elif GFX_VERx10 == 120
@@ -4367,8 +4375,6 @@ end_command_buffer(struct anv_cmd_buffer *cmd_buffer,
    /* Flush any in-progress CCS/MCS operations in preparation for chaining. */
    genX(cmd_buffer_update_color_aux_op)(cmd_buffer, ANV_COLOR_AUX_OP_CLASS_NONE);
 
-   genX(cmd_buffer_flush_generated_draws)(cmd_buffer);
-
    if (!is_companion) {
       reset_dgc_state(cmd_buffer);
 
@@ -4379,7 +4385,7 @@ end_command_buffer(struct anv_cmd_buffer *cmd_buffer,
          anv_add_pending_pipe_bits(cmd_buffer,
                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                                    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                   ANV_PIPE_QUERY_BITS(cmd_buffer->state.queries.clear_bits),
+                                   cmd_buffer->state.queries.clear_bits,
                                    "query clear flush prior command buffer end");
       }
 
@@ -4496,7 +4502,7 @@ genX(CmdExecuteCommands)(
       anv_add_pending_pipe_bits(container,
                                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                ANV_PIPE_QUERY_BITS(container->state.queries.clear_bits),
+                                container->state.queries.clear_bits,
                                 "query clear flush prior to secondary buffer");
    }
 
@@ -4811,8 +4817,10 @@ anv_pipe_flush_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
             /* We can use the data port when trying to stay in compute mode on
              * the RCS.
              */
-            pipe_bits |= ANV_PIPE_HDC_PIPELINE_FLUSH_BIT;
-            pipe_bits |= ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT;
+            if (GFX_VER < 20) {
+               pipe_bits |= ANV_PIPE_HDC_PIPELINE_FLUSH_BIT;
+               pipe_bits |= ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT;
+            }
             /* Most operations are done through RT/detph writes */
             pipe_bits |= ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT;
             pipe_bits |= ANV_PIPE_DEPTH_CACHE_FLUSH_BIT;
@@ -4873,28 +4881,39 @@ anv_pipe_invalidate_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
    u_foreach_bit64(b, flags) {
       switch ((VkAccessFlags2)BITFIELD64_BIT(b)) {
       case VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT:
+#if GFX_VER < 20
          /* Indirect draw commands take a buffer as input that we're going to
           * read from the command streamer to load some of the HW registers
           * (see genX_cmd_buffer.c:load_indirect_parameters). This requires a
           * command streamer stall so that all the cache flushes have
           * completed before the command streamer loads from memory.
+          *
+          * On Xe2+ we have indirect instructions :
+          *    - EXECUTE_INDIRECT_DRAW
+          *    - EXECUTE_INDIRECT_DISPATCH
+          *
+          * Using those means we don't have to stall for the data to be
+          * available for the MI commands.
           */
-         pipe_bits |=  ANV_PIPE_CS_STALL_BIT;
-         if (device->info->ver == 9) {
-            /* Indirect draw commands on Gfx9 also set gl_BaseVertex &
-             * gl_BaseIndex through a vertex buffer, so invalidate that cache.
-             */
-            pipe_bits |= ANV_PIPE_VF_CACHE_INVALIDATE_BIT;
-         }
+         pipe_bits |= ANV_PIPE_CS_STALL_BIT;
+#endif
+#if GFX_VER == 9
+         /* Indirect draw commands on Gfx9 also set gl_BaseVertex &
+          * gl_BaseIndex through a vertex buffer, so invalidate that cache.
+          */
+         pipe_bits |= ANV_PIPE_VF_CACHE_INVALIDATE_BIT;
+#endif
          /* For CmdDipatchIndirect, we load indirect gl_NumWorkGroups through
           * an A64 message, so we need to invalidate constant cache.
           */
          pipe_bits |= ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT;
-         /* Tile & Data cache flush needed For Cmd*Indirect* commands since
-          * command streamer is not L3 coherent.
-          */
-         pipe_bits |= ANV_PIPE_DATA_CACHE_FLUSH_BIT |
-                      ANV_PIPE_TILE_CACHE_FLUSH_BIT;
+         if (!ANV_DEVINFO_HAS_COHERENT_L3_CS(device->info)) {
+            /* Tile & Data cache flush needed For Cmd*Indirect* commands since
+             * command streamer is not L3 coherent.
+             */
+            pipe_bits |= ANV_PIPE_DATA_CACHE_FLUSH_BIT |
+                         ANV_PIPE_TILE_CACHE_FLUSH_BIT;
+         }
          break;
       case VK_ACCESS_2_INDEX_READ_BIT:
       case VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT:
@@ -4962,7 +4981,7 @@ anv_pipe_invalidate_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
          /* Prior to Gfx20, CS is not L3 coherent, so make the data available
           * for it by flushing L3.
           */
-         if (device->info->ver < 20) {
+         if (!ANV_DEVINFO_HAS_COHERENT_L3_CS(device->info)) {
             pipe_bits |= ANV_PIPE_TILE_CACHE_FLUSH_BIT;
             pipe_bits |= ANV_PIPE_DATA_CACHE_FLUSH_BIT;
          }
@@ -5722,9 +5741,6 @@ cmd_buffer_accumulate_barrier_bits(struct anv_cmd_buffer *cmd_buffer,
                ANV_PIPE_HDC_PIPELINE_FLUSH_BIT : ANV_PIPE_DATA_CACHE_FLUSH_BIT);
    }
 
-   if (dst_flags & VK_ACCESS_INDIRECT_COMMAND_READ_BIT)
-      genX(cmd_buffer_flush_generated_draws)(cmd_buffer);
-
 #if GFX_VER < 20
    /* Our HW implementation of the sparse feature prior to Xe2 lives in the
     * GAM unit (interface between all the GPU caches and external memory).
@@ -5754,8 +5770,12 @@ cmd_buffer_accumulate_barrier_bits(struct anv_cmd_buffer *cmd_buffer,
                ANV_PIPE_HDC_PIPELINE_FLUSH_BIT : ANV_PIPE_DATA_CACHE_FLUSH_BIT);
    }
 
-   if (dst_flags & VK_ACCESS_INDIRECT_COMMAND_READ_BIT)
+   if (dst_flags & VK_ACCESS_INDIRECT_COMMAND_READ_BIT) {
       genX(cmd_buffer_flush_generated_draws)(cmd_buffer);
+#if GFX_VER >= 20
+      cmd_buffer->state.mi_indirect_data_needs_cs_stall = true;
+#endif
+   }
 
    *out_src_stages = src_stages;
    *out_dst_stages = dst_stages;
@@ -5921,7 +5941,7 @@ genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
       anv_add_pending_pipe_bits(cmd_buffer,
                                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                ANV_PIPE_QUERY_BITS(cmd_buffer->state.queries.clear_bits),
+                                cmd_buffer->state.queries.clear_bits,
                                 "query clear flush prior to GPGPU");
    }
 
@@ -7558,7 +7578,8 @@ VkResult genX(CmdSetPerformanceStreamMarkerINTEL)(
    if (intel_perf_metrics_library_get_stream_marker_cmds(
           cmd_buffer->device->physical->perf, pMarkerInfo->marker,
           NULL, &cmds_size)) {
-      void* cmds = anv_batch_emit_dwords(&cmd_buffer->batch, cmds_size);
+      assert(cmds_size % 4 == 0);
+      void* cmds = anv_batch_emit_dwords(&cmd_buffer->batch, cmds_size / 4);
 
       success = cmds && intel_perf_metrics_library_get_stream_marker_cmds(
          cmd_buffer->device->physical->perf, pMarkerInfo->marker,
@@ -8072,15 +8093,4 @@ void genX(CmdWriteMarkerToMemoryAMD)(
                 mi_imm(pInfo->marker));
 
    trace_intel_end_write_buffer_marker(&cmd_buffer->trace);
-}
-
-void
-genX(cmd_write_buffer_cp)(struct anv_cmd_buffer *cmd_buffer,
-                          VkDeviceAddress dstAddr,
-                          void *data,
-                          uint32_t size)
-{
-   assert(size % 4 == 0);
-   struct anv_address addr = anv_address_from_u64(dstAddr);
-   anv_cmd_buffer_update_addr(cmd_buffer, addr, size, data);
 }

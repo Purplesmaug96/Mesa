@@ -20,8 +20,10 @@ Capability about the features and limits of the driver/GPU.
 
 * ``pipe_caps.graphics``: Whether graphics is supported. If not, contexts can
   only be created with PIPE_CONTEXT_COMPUTE_ONLY.
-* ``pipe_caps.npot_textures``: Whether :term:`NPOT` textures may have repeat modes,
-  normalized coordinates, and mipmaps.
+* ``pipe_caps.npot_textures``: Whether :term:`NPOT` textures may be sampled
+  with mipmap filtering and wrap modes other than clamp-to-edge. Sampling the
+  base level without mipmap filtering and with clamp-to-edge is always
+  supported.
 * ``pipe_caps.max_dual_source_render_targets``: How many dual-source blend RTs are support.
   :ref:`Blend` for more information.
 * ``pipe_caps.anisotropic_filter``: Whether textures can be filtered anisotropically.
@@ -590,6 +592,10 @@ Capability about the features and limits of the driver/GPU.
     fragment shader.
 * ``pipe_caps.point_size_fixed``: Driver supports point-sizes that are fixed,
   as opposed to writing gl_PointSize for every point.
+* ``pipe_caps.polygon_stipple``: Driver supports polygon stipple. If unset,
+  mesa/st emulates polygon stipple by sampling a stipple texture and doing
+  discard_if in the fragment shader, and set_polygon_stipple() will not be
+  called.
 * ``pipe_caps.two_sided_color``: Driver supports two-sided coloring.  Must be 1
     for non-NIR drivers.  If set, pipe_rasterizer_state may be set to indicate
     that back-facing primitives should use the back-side color as the FS input

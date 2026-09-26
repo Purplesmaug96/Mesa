@@ -53,8 +53,12 @@ jay_print_def(FILE *fp,
    jay_def def = src == -2 ? I->cond_flag : src == -1 ? I->dst : I->src[src];
    unsigned len = jay_num_values(def);
    const char *file = jay_file_prefix(def.file);
-   bool has_lu =
-      jay_is_ssa(def) && !jay_is_null(def) && lu && block->last_use && src >= 0;
+   bool has_lu = jay_is_ssa(def) &&
+                 !jay_is_null(def) &&
+                 lu &&
+                 block->last_use &&
+                 !func->shader->post_ra &&
+                 src >= 0;
 
    bool has_index = jay_channel(def, 0) != JAY_SENTINEL;
    bool has_reg =
@@ -218,10 +222,13 @@ jay_print_inst_with_lu(
 
    /* Software scoreboard dependency info */
    if (I->dep.regdist || I->dep.mode) {
-      fprintf(fp, "%s%s%s", strlen(sep) ? " {" : "{",
-              I->replicate_dep ? "*" : "", I->decrement_dep ? "+" : "");
+      fprintf(fp, "%s", strlen(sep) ? " {" : "{");
       gen_print_swsb(NULL, fp, I->dep);
       fprintf(fp, "}");
+   }
+
+   if (I->simd_split) {
+      fprintf(fp, " [%u/%u]", I->simd_offs, 1 << I->simd_split);
    }
 
    fprintf(fp, "\n");

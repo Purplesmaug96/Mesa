@@ -52,7 +52,6 @@
 #include "pvr_image.h"
 #include "pvr_macros.h"
 #include "pvr_pass.h"
-#include "pvr_pds.h"
 #include "pvr_physical_device.h"
 #include "pvr_rt_dataset.h"
 #include "pvr_types.h"
@@ -754,7 +753,6 @@ VkResult pvr_CreateBuffer(VkDevice _device,
    struct pvr_buffer *buffer;
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
-   assert(pCreateInfo->usage != 0);
 
    /* We check against (ULONG_MAX - alignment) to prevent overflow issues */
    if (pCreateInfo->size >= ULONG_MAX - alignment)
@@ -765,6 +763,7 @@ VkResult pvr_CreateBuffer(VkDevice _device,
    if (!buffer)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   assert(buffer->vk.usage != 0);
    buffer->alignment = alignment;
 
    *pBuffer = pvr_buffer_to_handle(buffer);

@@ -365,6 +365,20 @@ ac_fill_compiler_info(struct radeon_info *info, const struct drm_amdgpu_info_dev
 
    out->has_gfx6_mrt_export_bug =
       info->family == CHIP_TAHITI || info->family == CHIP_PITCAIRN || info->family == CHIP_VERDE;
+
+   /* Load balance per watt (LBPW) monitors HW utilization to determine
+    * if the HW can handle the workload with fewer CUs enabled.
+    * The SPI_LB_CU_MASK register directs the SPI to stop launching
+    * waves to a CU so it will be clock-gated. Due to a bug, SPI applies
+    * the clock-gate immediately, which causes pending LS/HS/CS waves on
+    * that CU to never be launched. (A microcode fix exists for CS.)
+    *
+    * The workaround is to limit each LS/HS threadgroup to a single wavefront.
+    * The kernel only enables LBPW on SI when VRAM is DDR3, that's when we
+    * need the workaround.
+    */
+   out->has_lbpw_tcs_wg_bug = info->gfx_level == GFX6 && info->vram_type == AMDGPU_VRAM_TYPE_DDR3;
+
    out->has_vtx_format_alpha_adjust_bug = info->gfx_level <= GFX8 && info->family != CHIP_STONEY;
 
    /* On GFX6-7, SMEM instructions access memory when num_records == 0 or offset >= num_records,
@@ -1033,8 +1047,16 @@ void ac_fill_bug_info(struct radeon_info *info)
    /* Firmware bug with DISPATCH_TASKMESH_INDIRECT_MULTI_ACE packets.
     * On old MEC FW versions, it hangs the GPU when indirect count is zero.
     */
-   info->has_taskmesh_indirect0_bug = info->gfx_level == GFX10_3 &&
-                                      info->mec_fw_version < 100;
+   if (info->gfx_level == GFX10_3) {
+      if (info->family == CHIP_RAPHAEL_MENDOCINO) {
+         info->has_taskmesh_indirect0_bug = info->mec_fw_version < 18;
+      } else {
+         /* All other GFX10.3 chips, including dGPUs, Vangogh and Rembrandt
+          * have been fixed in MEC 100.
+          */
+         info->has_taskmesh_indirect0_bug = info->mec_fw_version < 100;
+      }
+   }
 
    info->has_export_conflict_bug = info->gfx_level == GFX11;
 
@@ -1521,12 +1543,6 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       }
    }
 
-   /* Only require gfx or compute. */
-   if (!info->ip[AMD_IP_GFX].num_queues && !info->ip[AMD_IP_COMPUTE].num_queues) {
-      fprintf(stderr, "amdgpu: failed to find gfx or compute.\n");
-      return AC_QUERY_GPU_INFO_FAIL;
-   }
-
    r = ac_drm_query_firmware_version(dev, AMDGPU_INFO_FW_GFX_ME, 0, 0, &info->me_fw_version,
                                      &info->me_fw_feature);
    if (r) {
@@ -1661,10 +1677,10 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       info->pcie_bandwidth_mbps = info->pcie_num_lanes * 0.985 * 1024;
       break;
    case 4:
-      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 1.969 * 1024;
+      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 1.970 * 1024;
       break;
    case 5:
-      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 3.938 * 1024;
+      info->pcie_bandwidth_mbps = info->pcie_num_lanes * 3.940 * 1024;
       break;
    case 6:
       info->pcie_bandwidth_mbps = info->pcie_num_lanes * 7.563 * 1024;
@@ -2160,6 +2176,7 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_attr_ring = %i\n", info->compiler_info.has_attr_ring);
    fprintf(f, "    smaller_tcs_workgroups = %i\n", info->compiler_info.smaller_tcs_workgroups);
    fprintf(f, "    has_gfx6_mrt_export_bug = %i\n", info->compiler_info.has_gfx6_mrt_export_bug);
+   fprintf(f, "    has_lbpw_tcs_wg_bug = %i\n", info->compiler_info.has_lbpw_tcs_wg_bug);
    fprintf(f, "    has_vtx_format_alpha_adjust_bug = %i\n", info->compiler_info.has_vtx_format_alpha_adjust_bug);
    fprintf(f, "    has_smem_oob_access_bug = %i\n", info->compiler_info.has_smem_oob_access_bug);
    fprintf(f, "    has_image_load_dcc_bug = %i\n", info->compiler_info.has_image_load_dcc_bug);

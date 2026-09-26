@@ -1605,10 +1605,14 @@ tu_GetImageOpaqueCaptureDescriptorDataEXT(VkDevice device,
 {
    VK_FROM_HANDLE(tu_image, image, pInfo->image);
 
-   /* Save the image iova so that when replaying sparse images have a
-    * consistent iova and therefore consistent descriptor contents.
-    */
-   memcpy(pData, &image->iova, sizeof(image->iova));
+   if (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+      /* Save the image iova so that when replaying sparse images have a
+       * consistent iova and therefore consistent descriptor contents.
+       */
+      memcpy(pData, &image->iova, sizeof(image->iova));
+   } else {
+      memset(pData, 0, sizeof(image->iova));
+   }
    return VK_SUCCESS;
 }
 
@@ -1735,7 +1739,7 @@ tu_bind_sparse_image(struct tu_device *device, void *submit,
                   prev_bo_offset = bo ? column_bo_offset : 0;
                   bind_range = 4096;
                } else if (prev_image_offset + bind_range == image_offset &&
-                          (!bo || prev_bo_offset + bind_range == bo_offset)) {
+                          (!bo || prev_bo_offset + bind_range == column_bo_offset)) {
                   bind_range += 4096;
                } else {
                   tu_submit_add_bind(device, submit, &image->vma,

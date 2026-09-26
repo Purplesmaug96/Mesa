@@ -1,5 +1,6 @@
 /*
  * Copyright © 2021 Collabora Ltd.
+ * Copyright © 2026 NXP
  *
  * Derived from tu_device.c which is:
  * Copyright © 2016 Red Hat.
@@ -17,6 +18,8 @@
 
 #include "vk_alloc.h"
 #include "vk_log.h"
+
+#include "pan_trace.h"
 
 #include "panvk_entrypoints.h"
 #include "panvk_instance.h"
@@ -44,7 +47,7 @@ static const struct debug_control panvk_debug_options[] = {
    {"force_simultaneous", PANVK_DEBUG_FORCE_SIMULTANEOUS},
    {"implicit_others_inv", PANVK_DEBUG_IMPLICIT_OTHERS_INV},
    {"force_blackhole", PANVK_DEBUG_FORCE_BLACKHOLE},
-   {"wsi_afbc", PANVK_DEBUG_WSI_AFBC},
+   {"wsi_no_afbc", PANVK_DEBUG_WSI_NO_AFBC},
    {"no_wb_mmap", PANVK_DEBUG_NO_WB_MMAP},
    {"no_user_mmap_sync", PANVK_DEBUG_NO_USER_MMAP_SYNC},
    {"cached_before_coherent", PANVK_DEBUG_CACHED_BEFORE_COHERENT},
@@ -102,6 +105,7 @@ static const struct vk_instance_extension_table panvk_instance_extensions = {
    .KHR_surface = true,
    .KHR_surface_maintenance1 = true,
    .EXT_surface_maintenance1 = true,
+   .EXT_swapchain_colorspace = true,
 #endif
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
    .KHR_display = true,
@@ -213,6 +217,7 @@ panvk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO);
 
    panvk_debug_init();
+   pan_trace_init();
 
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(panvk_CreateInstance);

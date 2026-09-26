@@ -80,7 +80,7 @@ iris_backend_compile(const struct iris_screen *screen,
 
    params->prog_data->source_hash = *(uint64_t *)nir->info.source_blake3;
 
-   if (intel_use_jay(devinfo, nir->info.stage)) {
+   if (intel_use_jay(devinfo, nir)) {
       struct jay_shader_bin *bin =
          jay_compile(devinfo, mem_ctx, nir,
                      (union brw_any_prog_data *)params->prog_data,
@@ -108,7 +108,6 @@ iris_apply_brw_fs_prog_data(struct iris_compiled_shader *shader,
    iris->urb_setup_attribs_count = brw->urb_setup_attribs_count;
 
    iris->num_varying_inputs   = brw->num_varying_inputs;
-   iris->fs_config_param      = brw->fs_config_param;
    iris->flat_inputs          = brw->flat_inputs;
    iris->inputs               = brw->inputs;
    iris->computed_depth_mode  = brw->computed_depth_mode;
@@ -314,7 +313,6 @@ iris_apply_elk_fs_prog_data(struct iris_compiled_shader *shader,
    iris->urb_setup_attribs_count = elk->urb_setup_attribs_count;
 
    iris->num_varying_inputs   = elk->num_varying_inputs;
-   iris->fs_config_param      = elk->fs_config_param;
    iris->flat_inputs          = elk->flat_inputs;
    iris->inputs               = elk->inputs;
    iris->computed_depth_mode  = elk->computed_depth_mode;
@@ -2583,10 +2581,6 @@ iris_compile_gs(struct iris_screen *screen,
 
       struct iris_ubo_range ubo_ranges[4] = {};
       brw_apply_ubo_ranges(screen, nir, ubo_ranges, &brw_prog_data->base.base);
-
-      brw_compute_vue_map(devinfo,
-                          &brw_prog_data->base.vue_map, nir->info.outputs_written,
-                          key->vue.layout, /* pos_slots */ 1);
 
       struct brw_gs_prog_key brw_key = iris_to_brw_gs_key(screen, key);
 

@@ -391,26 +391,20 @@ anv_cmd_emit_conditional_render_predicate(struct anv_cmd_buffer *cmd_buffer)
 }
 
 static void
-clear_pending_query_bits(enum anv_query_bits *query_bits,
+clear_pending_query_bits(enum anv_pipe_bits *query_bits,
                          enum anv_pipe_bits flushed_bits)
 {
-   if (flushed_bits & ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT)
-      *query_bits &= ~ANV_QUERY_WRITES_RT_FLUSH;
+   /* Remove all the flushed bits except CS_STALL */
+   *query_bits &= ~flushed_bits | ANV_PIPE_CS_STALL_BIT;
 
-   if (flushed_bits & ANV_PIPE_TILE_CACHE_FLUSH_BIT)
-      *query_bits &= ~ANV_QUERY_WRITES_TILE_FLUSH;
-
-   if ((flushed_bits & ANV_PIPE_DATA_CACHE_FLUSH_BIT) &&
-       (flushed_bits & ANV_PIPE_HDC_PIPELINE_FLUSH_BIT) &&
-       (flushed_bits & ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT))
-      *query_bits &= ~ANV_QUERY_WRITES_TILE_FLUSH;
-
-   /* Once RT/TILE have been flushed, we can consider the CS_STALL flush */
-   if ((*query_bits & (ANV_QUERY_WRITES_TILE_FLUSH |
-                       ANV_QUERY_WRITES_RT_FLUSH |
-                       ANV_QUERY_WRITES_DATA_FLUSH)) == 0 &&
+   /* Only once there is no more flush bits consider the CS_STALL */
+   if ((*query_bits & (ANV_PIPE_TILE_CACHE_FLUSH_BIT |
+                       ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
+                       ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT |
+                       ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
+                       ANV_PIPE_DATA_CACHE_FLUSH_BIT)) == 0 &&
        (flushed_bits & (ANV_PIPE_END_OF_PIPE_SYNC_BIT | ANV_PIPE_CS_STALL_BIT)))
-      *query_bits &= ~ANV_QUERY_WRITES_CS_STALL;
+      *query_bits &= ~ANV_PIPE_CS_STALL_BIT;
 }
 
 void
@@ -473,7 +467,7 @@ anv_cmd_buffer_set_rt_query_buffer(struct anv_cmd_buffer *cmd_buffer,
    if (ray_shadow_size > 0 &&
        (!cmd_buffer->state.ray_query_shadow_bo ||
         cmd_buffer->state.ray_query_shadow_bo->size < ray_shadow_size)) {
-      unsigned shadow_size_log2 = MAX2(util_logbase2_ceil(ray_shadow_size), 16);
+      uint64_t shadow_size_log2 = MAX2(util_logbase2_ceil64(ray_shadow_size), 16ull);
       unsigned bucket = shadow_size_log2 - 16;
       assert(bucket < ARRAY_SIZE(device->ray_query_shadow_bos[0]));
 
@@ -481,7 +475,7 @@ anv_cmd_buffer_set_rt_query_buffer(struct anv_cmd_buffer *cmd_buffer,
       if (bo == NULL) {
          struct anv_bo *new_bo;
          VkResult result = anv_device_alloc_bo(device, "RT queries shadow",
-                                               1 << shadow_size_log2,
+                                               1ull << shadow_size_log2,
                                                ANV_BO_ALLOC_INTERNAL, /* alloc_flags */
                                                0, /* explicit_address */
                                                &new_bo);
@@ -1447,32 +1441,13 @@ anv_cmd_write_buffer_cp(VkCommandBuffer commandBuffer,
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
 
-   /* Force pipeline selection to be GPGPU so that Blorp code path picks up
-    * compute path rather than fragment shader.
-    */
-   anv_genX(cmd_buffer->device->info, flush_pipeline_select_gpgpu)(cmd_buffer,
-                                                                   false);
-
-   anv_genX(cmd_buffer->device->info, cmd_write_buffer_cp)(cmd_buffer, dstAddr,
-                                                           data, size);
+   anv_cmd_buffer_update_addr(cmd_buffer, anv_address_from_u64(dstAddr), size, data);
 }
 
 void
 anv_cmd_flush_buffer_write_cp(VkCommandBuffer commandBuffer)
 {
-   ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
-
-   /* IR header would get written using BLORP code path, so we need to flush
-    * RT, HDC and untyped dataport cache. We alway force batch to use compute
-    * shader so we don't need to flush out RT cache flush. See
-    * anv_cmd_write_buffer_cp().
-    */
-   anv_add_pending_pipe_bits(cmd_buffer,
-                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                             ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
-                             ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT,
-                             "Flush buffer write cp");
+   vk_bvh_build_barrier_transfer_to_compute(commandBuffer);
 }
 
 void

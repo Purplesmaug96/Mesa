@@ -1860,7 +1860,7 @@ generate_fs_config_state_bits(const struct brw_fs_prog_key *key,
    if (prog_data->provoking_vertex_last == comp_value)
       f |= INTEL_FS_CONFIG_PROVOKING_VERTEX_LAST;
 
-   if (prog_data->conservative_raster == comp_value)
+   if (key->conservative_raster == comp_value)
       f |= INTEL_FS_CONFIG_CONSERVATIVE_RASTER;
 
    if (key->mesh_input == comp_value)
@@ -2498,7 +2498,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
                    const struct brw_nir_compiler_opts *opts)
 {
    const struct intel_device_info *devinfo = compiler->devinfo;
-   bool jay = intel_use_jay(devinfo, nir->info.stage);
+   bool jay = intel_use_jay(devinfo, nir);
 
    /* TODO: This is part of the "pre-processing" before the shader is fed to
     * brw_compile_* functions, so there's no debug archiver available yet.
@@ -3395,7 +3395,7 @@ brw_vectorize_lower_mem_access(brw_pass_tracker *pt)
       };
       OPT(nir_opt_offsets, &offset_options);
 
-      OPT(brw_nir_lower_immediate_offsets, pt->key->use_efficient_64bit);
+      OPT(brw_nir_lower_immediate_offsets, devinfo, pt->key->use_efficient_64bit);
    }
 }
 
@@ -3606,7 +3606,7 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt)
 
    OPT(brw_nir_lower_mcs_fetch, devinfo);
 
-   bool jay = intel_use_jay(devinfo, nir->info.stage);
+   bool jay = intel_use_jay(devinfo, nir);
 
    OPT(intel_nir_lower_sparse_intrinsics, jay);
 

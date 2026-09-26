@@ -245,6 +245,7 @@ anv_device_print_init(struct anv_device *device)
    if (result != VK_SUCCESS)
       return result;
 
+   device->vk.debug_output = stderr;
    u_printf_init(&device->printf, bo, (uint32_t*)bo->map);
    return VK_SUCCESS;
 }
@@ -462,7 +463,7 @@ anv_device_init_rt_shaders(struct anv_device *device)
       };
 
       const unsigned *tramp_data = NULL;
-      if (intel_use_jay(device->info, MESA_SHADER_COMPUTE)) {
+      if (intel_use_jay(device->info, trampoline_nir)) {
          struct jay_shader_bin *bin =
             jay_compile(device->info, tmp_ctx, trampoline_nir,
                         (union brw_any_prog_data *)&trampoline_prog_data,
@@ -538,7 +539,7 @@ anv_device_init_rt_shaders(struct anv_device *device)
       };
 
       const unsigned *return_data = NULL;
-      if (intel_use_jay(device->info, MESA_SHADER_CALLABLE)) {
+      if (intel_use_jay(device->info, trivial_return_nir)) {
          struct jay_shader_bin *bin =
             jay_compile(device->info, tmp_ctx, trivial_return_nir,
                         (union brw_any_prog_data *)&return_prog_data,
@@ -611,7 +612,7 @@ anv_device_init_rt_shaders(struct anv_device *device)
          },
       };
       const unsigned *return_data = NULL;
-      if (intel_use_jay(device->info, MESA_SHADER_CALLABLE)) {
+      if (intel_use_jay(device->info, null_ahs_nir)) {
          struct jay_shader_bin *bin =
             jay_compile(device->info, tmp_ctx, null_ahs_nir,
                         (union brw_any_prog_data *)&return_prog_data,

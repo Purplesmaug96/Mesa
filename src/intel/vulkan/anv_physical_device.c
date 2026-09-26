@@ -20,6 +20,7 @@
 #include "git_sha1.h"
 
 #include "util/disk_cache.h"
+#include "util/hex.h"
 #include "util/os_misc.h"
 #include "util/mesa-blake3.h"
 #include "util/os_misc.h"
@@ -92,13 +93,10 @@ anv_physical_device_init_drirc(struct anv_physical_device *device)
 
    device->drirc_status = VK_SUCCESS;
 
-   char verx10_str[16];
-   snprintf(verx10_str, sizeof(verx10_str), "%u", device->info.verx10);
-
    anv_parse_dri_options(&device->drirc,
                          &(driConfigFileParseParams) {
                             .driverName = "anv",
-                            .deviceVersion = verx10_str,
+                            .deviceVersion = device->info.verx10,
                             .applicationName = instance->vk.app_info.app_name,
                             .applicationVersion = instance->vk.app_info.app_version,
                             .engineName = instance->vk.app_info.engine_name,
@@ -169,6 +167,20 @@ anv_physical_device_init_drirc(struct anv_physical_device *device)
                 device->drirc.perf.rt_dispatch_timeout);
       device->drirc.perf.rt_dispatch_timeout = 512;
       break;
+   }
+
+   if (device->drirc.perf.rt_tile_x != 0 &&
+       !util_is_power_of_two_nonzero(device->drirc.perf.rt_tile_x)) {
+      mesa_logw("Invalid value provided for drirc anv_rt_tile_x=%u, reverting to 0.",
+                device->drirc.perf.rt_tile_x);
+      device->drirc.perf.rt_tile_x = 0;
+   }
+
+   if (device->drirc.perf.rt_tile_y != 0 &&
+       !util_is_power_of_two_nonzero(device->drirc.perf.rt_tile_y)) {
+      mesa_logw("Invalid value provided for drirc anv_rt_tile_y=%u, reverting to 0.",
+                device->drirc.perf.rt_tile_y);
+      device->drirc.perf.rt_tile_y = 0;
    }
 
    return VK_SUCCESS;
@@ -614,6 +626,7 @@ get_device_extensions(const struct anv_physical_device *device,
 #endif
       .GOOGLE_hlsl_functionality1            = true,
       .GOOGLE_user_type                      = true,
+      .INTEL_device_info                     = true,
       .INTEL_performance_query               = device->perf && device->perf->use_metrics_library,
       .INTEL_shader_integer_functions2       = true,
       .MESA_image_alignment_control          = true,
@@ -1730,7 +1743,7 @@ get_properties(const struct anv_physical_device *pdevice,
             "%s", (strlen(pdevice->drirc.debug.force_vk_devicename) > 0) ?
                   pdevice->drirc.debug.force_vk_devicename : pdevice->info.name);
    memcpy(props->pipelineCacheUUID,
-          pdevice->pipeline_cache_uuid, VK_UUID_SIZE);
+          pdevice->shader_binary_uuid, VK_UUID_SIZE);
 
    get_properties_1_1(pdevice, props);
    get_properties_1_2(pdevice, props);
@@ -2031,7 +2044,7 @@ get_properties(const struct anv_physical_device *pdevice,
       props->imageDescriptorAlignment = ANV_SURFACE_STATE_SIZE;
       props->bufferDescriptorAlignment = ANV_SURFACE_STATE_SIZE;
       props->maxPushDataSize = MAX_PUSH_CONSTANTS_SIZE;
-      props->imageCaptureReplayOpaqueDataSize = 8;
+      props->imageCaptureReplayOpaqueDataSize = sizeof(struct anv_image_opaque_capture_data);
       props->maxDescriptorHeapEmbeddedSamplers = MAX_EMBEDDED_SAMPLERS;
       props->samplerYcbcrConversionCount = 3;
       props->sparseDescriptorHeaps = pdevice->info.kmd_type == INTEL_KMD_TYPE_XE;
@@ -2454,6 +2467,13 @@ get_properties(const struct anv_physical_device *pdevice,
    {
       props->maxDeviceFaultCount = UINT32_MAX;
    }
+
+   /* VK_INTEL_device_info */
+   {
+      props->deviceIpVersionArch = devinfo->gfx_ip_ver >> 16;
+      props->deviceIpVersionRelease = devinfo->gfx_ip_ver & 0xffff;
+      props->deviceIpVersionRevision = devinfo->revision;
+   }
 }
 
 /* This function restricts the maximum size of system memory heap. The
@@ -2722,21 +2742,10 @@ anv_physical_device_init_uuids(struct anv_physical_device *device)
 
    copy_build_id_to_sha1(device->driver_build_sha1, note);
 
-   blake3_hasher blake3_ctx;
-   uint8_t blake3[BLAKE3_KEY_LEN];
-   STATIC_ASSERT(VK_UUID_SIZE <= sizeof(blake3));
-
-   /* The pipeline cache UUID is used for determining when a pipeline cache is
-    * invalid.  It needs both a driver build and the PCI ID of the device.
+   /* Fills device->shader_binary_uuid, which the pipeline cache UUID and the
+    * disk cache id below are also taken from.
     */
-   _mesa_blake3_init(&blake3_ctx);
-   _mesa_blake3_update(&blake3_ctx, build_id_data(note), build_id_len);
-   brw_device_blake3_update(&blake3_ctx, &device->info);
-   bool always_use_bindless = device->drirc.features.always_bindless;
-   _mesa_blake3_update(&blake3_ctx, &always_use_bindless,
-                     sizeof(always_use_bindless));
-   _mesa_blake3_final(&blake3_ctx, blake3);
-   memcpy(device->pipeline_cache_uuid, blake3, VK_UUID_SIZE);
+   anv_shader_init_uuid(device);
 
    intel_uuid_compute_driver_id(device->driver_uuid, &device->info, VK_UUID_SIZE);
    intel_uuid_compute_device_id(device->device_uuid, &device->info, VK_UUID_SIZE);
@@ -2753,12 +2762,16 @@ anv_physical_device_init_disk_cache(struct anv_physical_device *device)
                                device->info.pci_device_id);
    assert(len == sizeof(renderer) - 2);
 
-   char timestamp[BLAKE3_HEX_LEN];
-   _mesa_blake3_format(timestamp, device->driver_build_sha1);
+   /* The driver id namespaces everything the runtime puts in the disk cache,
+    * including the NIR of vk_pipeline_precompile_shader(), which is keyed on
+    * API state alone. So it needs the compile options, not just the build.
+    */
+   char driver_id[VK_UUID_SIZE * 2 + 1];
+   mesa_bytes_to_hex(driver_id, device->shader_binary_uuid, VK_UUID_SIZE);
 
    const uint64_t driver_flags =
       brw_get_compiler_config_value(device->compiler);
-   device->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
+   device->vk.disk_cache = disk_cache_create(renderer, driver_id, driver_flags);
 #endif
 }
 
@@ -3111,7 +3124,6 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
          device->has_astc_ldr && !device->emu_astc_ldr;
    }
    device->brw_disable_subgroup_size_control =
-      !intel_use_jay(&device->info, MESA_SHADER_COMPUTE) &&
       device->drirc.debug.disable_subgroup_size_control;
 
    result = anv_physical_device_init_heaps(device, fd);
@@ -3215,6 +3227,8 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    device->can_get_vm_faults =
       !device->has_scratch_page && xe_gem_supports_get_vm_faults(device->local_fd);
 
+   device->info.no_jay = device->drirc.perf.disable_jay;
+
    device->compiler = brw_compiler_create(NULL, &device->info);
    if (device->compiler == NULL) {
       result = vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -3260,8 +3274,6 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    anv_physical_device_init_queue_families(device);
 
    anv_physical_device_init_perf(device, fd);
-
-   anv_shader_init_uuid(device);
 
    /* Gather major/minor before WSI. */
    struct stat st;

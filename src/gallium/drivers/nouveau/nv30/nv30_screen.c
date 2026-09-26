@@ -129,6 +129,7 @@ nv30_init_screen_caps(struct nv30_screen *screen)
    caps->clear_scissored = true;
    caps->allow_mapped_buffers_during_execution = true;
    caps->query_memory_info = true;
+   caps->polygon_stipple = true;
    caps->vertex_input_alignment = PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
    caps->texture_transfer_modes = PIPE_TEXTURE_TRANSFER_BLIT;
    /* nv35 capabilities */
@@ -366,7 +367,8 @@ nv30_screen_is_format_supported(struct pipe_screen *pscreen,
    .force_indirect_unrolling = nir_var_all,\
    .force_indirect_unrolling_sampler = true,\
    .max_unroll_iterations = 32,\
-   .no_integers = true
+   .no_integers = true, \
+   .fdot_replicates = true
 
 // VERTEX
 

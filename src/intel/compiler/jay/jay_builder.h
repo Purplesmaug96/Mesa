@@ -463,6 +463,9 @@ struct jayb_send_params {
    bool bindless;
    bool pure;
    bool skip_helpers;
+   /* if true, don't include mlen in ex_desc */
+   bool use_raw_ex_desc;
+   uint8_t explicit_simd_width;
 };
 
 static inline jay_inst *
@@ -471,6 +474,7 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
    const struct intel_device_info *devinfo = b->shader->devinfo;
    jay_inst *I = jay_alloc_inst(b, JAY_OPCODE_SEND, 4, sizeof(jay_send_info));
    jay_send_info *info = jay_get_send_info(I);
+   info->explicit_simd_width = p.explicit_simd_width;
    bool has_header = !jay_is_null(p.header);
 
    I->dst = p.dst;
@@ -600,10 +604,17 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
       I->src[1] =
          jay_imm(brw_message_ex_desc(devinfo, lens[2]) | (p.msg_desc >> 32));
    } else if (p.ex_desc.file == J_ADDRESS) {
+      /* p.ex_desc should end up in an address register, so use it if it is
+       * provided in one already. this is necessary for anything generating
+       * SENDs after jay_lower_pre_ra (e.g. spills/fills).
+       */
       I->src[1] = p.ex_desc;
    } else {
-      I->src[1] = jay_alloc_def(b, J_ADDRESS, 1);
-      if (info->bindless) {
+      /* Otherwise we assume jay_lower_pre_ra will move it to an address
+       * register, so we can just stuff it in a UGPR for now.
+       */
+      I->src[1] = jay_alloc_def(b, UGPR, 1);
+      if (info->bindless || p.use_raw_ex_desc) {
          jay_MOV(b, I->src[1], p.ex_desc);
       } else {
          jay_OR(b, JAY_TYPE_U32, I->src[1], p.ex_desc,

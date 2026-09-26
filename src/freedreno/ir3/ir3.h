@@ -201,6 +201,9 @@ typedef enum ir3_register_flags {
    IR3_REG_UNIFORM = BIT(24),
 } ir3_register_flags;
 
+#define IR3_REG_SRC_MODS (IR3_REG_FNEG | IR3_REG_FABS | IR3_REG_SNEG | \
+                          IR3_REG_SABS | IR3_REG_BNOT)
+
 struct ir3_register {
    BITMASK_ENUM(ir3_register_flags) flags;
 
@@ -1389,6 +1392,12 @@ is_alu(struct ir3_instruction *instr)
 }
 
 static inline bool
+is_mov(struct ir3_instruction *instr)
+{
+   return opc_cat(instr->opc) == 1;
+}
+
+static inline bool
 is_sfu(struct ir3_instruction *instr)
 {
    return (opc_cat(instr->opc) == 4) || instr->opc == OPC_GETFIBERID;
@@ -1520,6 +1529,7 @@ is_bool(struct ir3_instruction *instr)
    case OPC_CMPS_F:
    case OPC_CMPS_S:
    case OPC_CMPS_U:
+   case OPC_GETBIT_B:
       return true;
    default:
       return false;

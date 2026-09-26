@@ -2840,9 +2840,6 @@ typedef struct nir_tex_instr {
     */
    bool embedded_sampler;
 
-   /** True if the offset is not dynamically uniform */
-   bool offset_non_uniform;
-
    /** True whether this returns the same result anywhere in the shader and
     *  doesn't cause page faults.
     */
@@ -5219,6 +5216,7 @@ void nir_shader_clear_pass_flags(nir_shader *shader);
 unsigned nir_shader_index_vars(nir_shader *shader, nir_variable_mode modes);
 unsigned nir_function_impl_index_vars(nir_function_impl *impl);
 
+void nir_print_shader_dbg(nir_shader *shader, FILE *fp);
 void nir_print_shader(nir_shader *shader, FILE *fp);
 void nir_print_function_body(nir_function_impl *impl, FILE *fp);
 void nir_print_shader_annotated(nir_shader *shader, FILE *fp, struct hash_table *errors);
@@ -5398,7 +5396,7 @@ extern simple_mtx_t nir_print_lock;
       if (should_print_nir(nir)) {                                                       \
          if ((nir)->nir_pass_recursed)                                                   \
             printf("%s (finished)\n", #pass);                                            \
-         nir_print_shader(nir, stdout);                                                  \
+         nir_print_shader_dbg(nir, stdout);                                              \
       }                                                                                  \
       nir_metadata_check_validation_flag(nir);                                           \
       nir_validate_progress_finish(nir, &blob_before, true, when);                       \
@@ -6414,6 +6412,12 @@ typedef struct nir_lower_tex_options {
    unsigned saturate_s;
    unsigned saturate_t;
    unsigned saturate_r;
+
+   /* Bitmask of samplers whose txl LOD <= 0.5 is replaced with 0.0, moving
+    * the magnification switch-over point from a lambda of 0 to the 0.5 that
+    * ES 2.0 and GL up to 3.0 ask for.
+    */
+   unsigned lower_txl_mag_switchover;
 
    /* Bitmask of textures that need swizzling.
     *

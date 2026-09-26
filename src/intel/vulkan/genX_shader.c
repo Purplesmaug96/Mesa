@@ -1176,7 +1176,6 @@ emit_cs_shader(struct anv_batch *batch,
          .WalkOrder              = cs_prog_data->walk_order,
          .TileLayout             = cs_prog_data->walk_order == INTEL_WALK_ORDER_YXZ ?
                                    TL_TileY32bpe : TL_Linear,
-         .StatCountDisable       = true,/* TODO: should it be enabled? */
          .DispatchWalkOrder      = cs_prog_data->uses_sampler ? DWO_Morton2x2XYWalk : DWO_LinearWalk,
          .ThreadGroupBatchSize   = cs_prog_data->uses_sampler ? TGBS_TG_BATCH_4 : TGBS_TG_BATCH_1,
          .ExecutionMask          = dispatch.right_mask,
@@ -1192,7 +1191,7 @@ emit_cs_shader(struct anv_batch *batch,
             .RegistersPerThread                 = intel_register_blocks(devinfo,
                                                                         cs_prog_data->base.grf_used),
             .NumberofThreadsinGPGPUThreadGroup  = dispatch.threads,
-            .ThreadGroupDispatchSize            = intel_compute_threads_group_dispatch_size(dispatch.threads),
+            .ThreadGroupDispatchSize            = intel_compute_threads_group_dispatch_size_walker_2(dispatch.threads),
             .SharedLocalMemorySize              = intel_compute_slm_encode_size(GFX_VER, cs_prog_data->base.total_shared),
             .PreferredSLMAllocationSize         = intel_compute_preferred_slm_calc_encode_size(
                devinfo, cs_prog_data->base.total_shared, dispatch.group_size, dispatch.simd_size),

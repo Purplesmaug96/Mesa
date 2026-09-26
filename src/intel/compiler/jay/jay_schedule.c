@@ -197,9 +197,7 @@ populate_dag(struct sched_ctx *ctx, jay_block *block)
       }
 
       /* Serialize address register access until we have an address RA */
-      bool use_a0 = I->dst.file == J_ADDRESS ||
-                    I->op == JAY_OPCODE_SHUFFLE ||
-                    I->op == JAY_OPCODE_VECTOR_EXTRACT;
+      bool use_a0 = I->dst.file == J_ADDRESS || I->op == JAY_OPCODE_SHUFFLE;
       jay_foreach_src(I, s) {
          use_a0 |= I->src[s].file == J_ADDRESS;
       }
@@ -601,7 +599,7 @@ pass(jay_function *f)
 
    if (sctx.phase == POSTSPILL) {
       jay_foreach_ssa_file(file) {
-         sctx.demand_limit[file] = jay_num_regs(f->shader, file);
+         sctx.demand_limit[file] = f->shader->num_regs[file];
       }
 
       for (unsigned i = 0; i < f->shader->partition.nr_blocks[UGPR]; ++i) {
