@@ -19,7 +19,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # clang backend cannot emit PIC code at -O3 (fatal assembler errors), so
 # disable it when building for the Xbox 360.
 set(_mesa_need_pic ON)
-if(CMAKE_SYSTEM_NAME STREQUAL "Generic" AND CMAKE_SYSTEM_VERSION STREQUAL "xbox360")
+if(CMAKE_SYSTEM_NAME STREQUAL "xbox360")
   set(_mesa_need_pic OFF)
 endif()
 set(CMAKE_POSITION_INDEPENDENT_CODE ${_mesa_need_pic})
